@@ -51,7 +51,7 @@ Provenance
 
 [![Gordian Open Integrity](https://github.com/Stream44/t44-docker.com/actions/workflows/gordian-open-integrity.yaml/badge.svg)](https://github.com/Stream44/t44-docker.com/actions/workflows/gordian-open-integrity.yaml?query=branch%3Amain) [![DCO Signatures](https://github.com/Stream44/t44-docker.com/actions/workflows/dco.yaml/badge.svg)](https://github.com/Stream44/t44-docker.com/actions/workflows/dco.yaml?query=branch%3Amain)
 
-Repository DID: `did:repo:3057fddfce16cbc282f4c20568c1dd1fdd150de5`
+Repository DID: `did:repo:0184bef21b1455aab8e195832918bedc965076bb`
 
 <table>
   <tr>
