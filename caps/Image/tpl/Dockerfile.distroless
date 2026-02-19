@@ -1,0 +1,45 @@
+# Most secure option: Google Distroless (~20-30MB base)
+# Best for: Production security (no shell, minimal attack surface)
+# Trade-off: No wget for health checks, harder to debug
+
+# Build stage for installing native dependencies
+FROM oven/bun:1.2-slim AS builder
+WORKDIR /app
+# Copy all app files
+COPY . /app/
+RUN bun install --production --no-save
+
+# Use Debian base for glibc compatibility
+FROM gcr.io/distroless/base-debian12:latest
+
+# Set working directory
+WORKDIR /app
+
+# Copy Bun runtime from builder
+COPY --from=builder /usr/local/bin/bun /usr/local/bin/bun
+
+# Copy C++ runtime libraries from builder (required by libsql native module)
+COPY --from=builder /usr/lib/*/libstdc++.so.6 /usr/lib/
+COPY --from=builder /usr/lib/*/libgcc_s.so.1 /usr/lib/
+
+# Copy native dependencies from builder
+COPY --from=builder /app/node_modules ./node_modules
+
+# Copy all app files from builder
+COPY --from=builder /app /app
+
+# Create non-root user and set ownership
+# Note: distroless uses numeric UIDs since there's no shell to create users
+COPY --from=builder --chown=1001:1001 /app /app
+
+# Switch to non-root user (numeric UID since distroless has no user database)
+USER 1001
+
+# Environment variables (can be overridden at runtime)
+ENV IPFS_GATEWAY_TOKEN=""
+
+# Note: Health checks won't work without wget/curl
+# You'll need to rely on external monitoring or TCP checks
+
+# Run the app using bun
+CMD ["bun", "run", "start"]

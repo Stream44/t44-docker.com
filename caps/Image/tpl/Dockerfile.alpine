@@ -1,0 +1,40 @@
+# Smallest option: Alpine with glibc (~16MB base + binary)
+# Best for: Production where size is critical
+# Trade-off: Minimal debugging tools
+
+FROM frolvlad/alpine-glibc:latest
+
+# Install wget for health checks and bun for native modules
+RUN apk add --no-cache wget ca-certificates unzip bash curl libstdc++ libgcc
+
+# Install Bun to system-wide location
+RUN wget -qO- https://bun.sh/install | bash -s -- bun-v1.2.0 && \
+    mv /root/.bun/bin/bun /usr/local/bin/bun && \
+    chmod +x /usr/local/bin/bun
+
+# Set working directory
+WORKDIR /app
+
+# Copy all app files from build context
+COPY . /app/
+
+# Install only production dependencies (native modules)
+RUN bun install --production --no-save
+
+# Make binaries executable (if any)
+RUN find /app -type f -name "*.sh" -exec chmod +x {} \; || true
+RUN find /app/dist -type f -executable -exec chmod +x {} \; 2>/dev/null || true
+
+# Create non-root user
+RUN addgroup -g 1001 -S appuser && \
+    adduser -u 1001 -S appuser -G appuser && \
+    chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Environment variables (can be overridden at runtime)
+ENV IPFS_GATEWAY_TOKEN=""
+
+# Run the app using bun
+CMD ["bun", "run", "start"]
