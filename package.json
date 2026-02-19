@@ -9,7 +9,7 @@
     },
     "dependencies": {
         "t44": "^0.4.0-rc.15",
-        "@stream44.studio/encapsulate": "^0.4.0-rc.15"
+        "@stream44.studio/encapsulate": "^0.4.0-rc.16"
     },
     "devDependencies": {
         "@types/bun": "^1.3.4",
