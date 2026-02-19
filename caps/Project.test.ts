@@ -157,8 +157,6 @@ describe('Project Capsule', () => {
                                         '#': {
                                             organization: 'test-docker-com',
                                             repository: 'project-full-test',
-                                            appBaseDir: appDir,
-                                            buildContextBaseDir: join(appDir, '.~o/t44-docker.com'),
                                             verbose: false
                                         },
                                     },
@@ -170,6 +168,9 @@ describe('Project Capsule', () => {
                 return { spine }
             }, async ({ spine, apis }: any) => {
                 const project = apis[spine.capsuleSourceLineRef].project
+
+                project.image.context.appBaseDir = appDir;
+                project.image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
 
                 const buildResult = await project.buildDev();
                 expect(buildResult.imageTag).toBeTruthy();
@@ -205,8 +206,6 @@ describe('Project Capsule', () => {
                                         '#': {
                                             organization: 'test-docker-com',
                                             repository: 'project-retag-source',
-                                            appBaseDir: appDir,
-                                            buildContextBaseDir: join(appDir, '.~o/t44-docker.com'),
                                             verbose: false
                                         },
                                     },
@@ -228,8 +227,6 @@ describe('Project Capsule', () => {
                                         '#': {
                                             organization: 'test-docker-com',
                                             repository: 'project-retag-target',
-                                            appBaseDir: appDir,
-                                            buildContextBaseDir: join(appDir, '.~o/t44-docker.com'),
                                             verbose: false
                                         },
                                     },
@@ -243,6 +240,11 @@ describe('Project Capsule', () => {
             }, async ({ sourceSpine, targetSpine, apis }: any) => {
                 const sourceProject = apis[sourceSpine.capsuleSourceLineRef].project
                 const targetProject = apis[targetSpine.capsuleSourceLineRef].project
+
+                sourceProject.image.context.appBaseDir = appDir;
+                sourceProject.image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
+                targetProject.image.context.appBaseDir = appDir;
+                targetProject.image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
 
                 const currentArch = sourceProject.cli.getCurrentPlatformArch();
                 await sourceProject.image.buildVariant({ variant: 'alpine', arch: currentArch });
