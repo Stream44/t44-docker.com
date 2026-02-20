@@ -1,6 +1,6 @@
 MIT License
 
-t44 Capsules for Docker: encapsulate bindings for the Docker command-line tool.
+Docker Tools for Terminal44 Workspace
 
 Copyright 2026 Christoph Dorn - https://Christoph.diy
 

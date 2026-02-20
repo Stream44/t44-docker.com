@@ -1,7 +1,7 @@
 {
     "name": "@stream44.studio/t44-docker.com",
     "version": "0.1.0-rc.2",
-    "private": true,
+    "private": false,
     "license": "MIT",
     "type": "module",
     "scripts": {
