@@ -351,7 +351,7 @@ export async function capsule({
                             '-u', username,
                             '--password-stdin',
                             'registry.hub.docker.com'
-                        ]);
+                        ], { stdin: password + '\n' });
 
                         return result;
                     }

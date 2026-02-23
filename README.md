@@ -1,8 +1,12 @@
-⚠️ **WARNING:** This repository may get squashed and force-pushed if the [GordianOpenIntegrity](https://github.com/Stream44/t44-docker.com) implementation must change in incompatible ways. Keep your diffs until the **GordianOpenIntegrity** system is stable.
+<table>
+  <tr>
+    <td><a href="https://Stream44.Studio"><img src=".o/stream44.studio/assets/Icon-v1.svg" width="42" height="42"></a></td>
+    <td><strong><a href="https://Stream44.Studio">Stream44 Studio</a></strong><br/>Open Development Project</td>
+    <td>Preview release for community feedback.<br/>Get in touch on <a href="https://discord.gg/9eBcQXEJAN">discord</a>.</td>
+  </tr>
+</table>
 
-🔷 **Open Development Project:** The implementation is a preview release for community feedback.
-
-⚠️ **Disclaimer:** Under active development. Code has not been audited, APIs and interfaces are subject to change.
+⚠️ **Disclaimer:** Under active development. Code has not been audited. APIs and interfaces are subject to change!
 
 `t44` Capsules for Docker [![Tests](https://github.com/Stream44/t44-docker.com/actions/workflows/test.yaml/badge.svg)](https://github.com/Stream44/t44-docker.com/actions/workflows/test.yaml?query=branch%3Amain)
 ===
@@ -66,4 +70,4 @@ Repository DID: `did:repo:e3a028ddf2e2061c350dc3146a22165b667d93eb`
   </tr>
 </table>
 
-(c) 2026 [Christoph.diy](https://christoph.diy) • Code: [MIT](./LICENSE.txt) • Text: `CC-BY` • Created with [Stream44.Studio](https://Stream44.Studio)
+(c) 2026 [Christoph.diy](https://christoph.diy) • Code: [MIT](./LICENSE.txt) • Text: [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) • Created with [Stream44.Studio](https://Stream44.Studio)

@@ -65,12 +65,49 @@ export async function capsule({
                  */
                 exec: {
                     type: CapsulePropertyTypes.Function,
-                    value: async function (this: any, args: string[]): Promise<string> {
-                        if (this.verbose) {
-                            console.log(`[docker] Executing: docker ${args.join(' ')}`);
+                    value: async function (this: any, args: string[], options?: { stdin?: string; retry?: number | boolean; retryDelayMs?: number }): Promise<string> {
+                        const maxAttempts = options?.retry === true ? 3 : (options?.retry || 1);
+                        const delayMs = options?.retryDelayMs ?? 5000;
+
+                        const attempt = async (): Promise<string> => {
+                            if (this.verbose) {
+                                console.log(`[docker] Executing: docker ${args.join(' ')}`);
+                            }
+                            if (options?.stdin !== undefined) {
+                                const proc = Bun.spawn(['docker', ...args], {
+                                    stdin: 'pipe',
+                                    stdout: 'pipe',
+                                    stderr: 'pipe',
+                                });
+                                proc.stdin.write(options.stdin);
+                                proc.stdin.end();
+                                const [stdout, stderr] = await Promise.all([
+                                    new Response(proc.stdout).text(),
+                                    new Response(proc.stderr).text(),
+                                ]);
+                                await proc.exited;
+                                if (proc.exitCode !== 0) {
+                                    throw new Error(`docker ${args[0]} failed (exit ${proc.exitCode}): ${stderr}`);
+                                }
+                                return stdout.trim();
+                            }
+                            const result = await $`docker ${args}`.text();
+                            return result.trim();
+                        };
+
+                        let lastError: unknown;
+                        for (let i = 1; i <= maxAttempts; i++) {
+                            try {
+                                return await attempt();
+                            } catch (err) {
+                                lastError = err;
+                                if (i < maxAttempts) {
+                                    console.error(`  ⚠️  docker ${args[0]} attempt ${i}/${maxAttempts} failed, retrying in ${delayMs / 1000}s...`);
+                                    await new Promise(r => setTimeout(r, delayMs));
+                                }
+                            }
                         }
-                        const result = await $`docker ${args}`.text();
-                        return result.trim();
+                        throw lastError;
                     }
                 },
 
