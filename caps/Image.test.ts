@@ -1,7 +1,7 @@
 #!/usr/bin/env bun test --timeout 120000
 
 import * as bunTest from 'bun:test'
-import { run } from 't44/standalone-rt'
+import { run } from '@stream44.studio/t44/standalone-rt'
 import { join } from 'path'
 import { mkdir, writeFile } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -16,7 +16,7 @@ const {
             '#': {
                 test: {
                     type: CapsulePropertyTypes.Mapping,
-                    value: 't44/caps/ProjectTest',
+                    value: '@stream44.studio/t44/caps/ProjectTest',
                     options: {
                         '#': {
                             bunTest,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun test --timeout 60000
 
 import * as bunTest from 'bun:test'
-import { run } from 't44/workspace-rt'
+import { run } from '@stream44.studio/t44/workspace-rt'
 
 const {
     test: { describe, it, expect },
@@ -13,7 +13,7 @@ const {
             '#': {
                 test: {
                     type: CapsulePropertyTypes.Mapping,
-                    value: 't44/caps/ProjectTest',
+                    value: '@stream44.studio/t44/caps/ProjectTest',
                     options: {
                         '#': {
                             bunTest,
