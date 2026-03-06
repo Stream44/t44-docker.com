@@ -188,6 +188,346 @@ describe('Project Capsule', () => {
         }, 180000);
     });
 
+    describe('buildDev with tagLatest', () => {
+        it('should tag image with -latest suffix when tagLatest is true', async () => {
+            const appDir = join(workbenchDir, 'project-taglatest-test');
+            await createSampleApp(appDir);
+
+            await run(async ({ encapsulate, CapsulePropertyTypes, makeImportStack }: any) => {
+                const spine = await encapsulate({
+                    '#@stream44.studio/encapsulate/spine-contracts/CapsuleSpineContract.v0': {
+                        '#@stream44.studio/encapsulate/structs/Capsule': {},
+                        '#': {
+                            project: {
+                                type: CapsulePropertyTypes.Mapping,
+                                value: './Project',
+                                options: {
+                                    '@stream44.studio/t44-docker.com/caps/ImageContext': {
+                                        '#': {
+                                            organization: 'test-docker-com',
+                                            repository: 'project-taglatest-test',
+                                            verbose: false
+                                        },
+                                    },
+                                },
+                            },
+                        }
+                    }
+                }, { importMeta: import.meta, importStack: makeImportStack(), capsuleName: '@stream44.studio/t44-docker.com/caps/Project.test.taglatest' })
+                return { spine }
+            }, async ({ spine, apis }: any) => {
+                const project = apis[spine.capsuleSourceLineRef].project
+
+                project.image.context.appBaseDir = appDir;
+                project.image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
+
+                const buildResult = await project.buildDev({ tagLatest: true });
+                expect(buildResult.imageTag).toBeTruthy();
+
+                // Verify the -latest tag exists
+                const latestTag = project.image.context.getLatestImageTag({
+                    variant: 'alpine',
+                    arch: project.cli.getCurrentPlatformArch()
+                });
+                const latestExists = await project.image.doesImageTagExist(latestTag);
+                expect(latestExists).toBe(true);
+
+                // Cleanup
+                await project.image.removeImage({ image: buildResult.imageTag, force: true }).catch(() => { });
+                await project.image.removeImage({ image: latestTag, force: true }).catch(() => { });
+            }, { importMeta: import.meta, runFromSnapshot: false })
+        }, 120000);
+    });
+
+    describe('buildDev with tagVersion', () => {
+        it('should tag image with version from package.json when tagVersion is true', async () => {
+            const appDir = join(workbenchDir, 'project-tagversion-test');
+            await createSampleApp(appDir);
+
+            await run(async ({ encapsulate, CapsulePropertyTypes, makeImportStack }: any) => {
+                const spine = await encapsulate({
+                    '#@stream44.studio/encapsulate/spine-contracts/CapsuleSpineContract.v0': {
+                        '#@stream44.studio/encapsulate/structs/Capsule': {},
+                        '#': {
+                            project: {
+                                type: CapsulePropertyTypes.Mapping,
+                                value: './Project',
+                                options: {
+                                    '@stream44.studio/t44-docker.com/caps/ImageContext': {
+                                        '#': {
+                                            organization: 'test-docker-com',
+                                            repository: 'project-tagversion-test',
+                                            verbose: false
+                                        },
+                                    },
+                                },
+                            },
+                        }
+                    }
+                }, { importMeta: import.meta, importStack: makeImportStack(), capsuleName: '@stream44.studio/t44-docker.com/caps/Project.test.tagversion' })
+                return { spine }
+            }, async ({ spine, apis }: any) => {
+                const project = apis[spine.capsuleSourceLineRef].project
+
+                project.image.context.appBaseDir = appDir;
+                project.image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
+
+                const buildResult = await project.buildDev({ tagVersion: true });
+                expect(buildResult.imageTag).toBeTruthy();
+
+                // Verify the version tag exists (package.json has version 0.1.0)
+                const versionTag = project.image.context.getVersionImageTag({
+                    variant: 'alpine',
+                    arch: project.cli.getCurrentPlatformArch(),
+                    version: '0.1.0'
+                });
+                const versionExists = await project.image.doesImageTagExist(versionTag);
+                expect(versionExists).toBe(true);
+
+                // Cleanup
+                await project.image.removeImage({ image: buildResult.imageTag, force: true }).catch(() => { });
+                await project.image.removeImage({ image: versionTag, force: true }).catch(() => { });
+            }, { importMeta: import.meta, runFromSnapshot: false })
+        }, 120000);
+
+        it('should fail with clear error when package.json has no version', async () => {
+            const appDir = join(workbenchDir, 'project-tagversion-noversion-test');
+            await mkdir(appDir, { recursive: true });
+
+            // Create package.json without version field
+            await writeFile(join(appDir, 'index.ts'), `
+const server = Bun.serve({
+    port: 3000,
+    fetch(req) {
+        return new Response("Hello!");
+    },
+});
+console.log("READY");
+`);
+            await writeFile(join(appDir, 'package.json'), JSON.stringify({
+                name: 'no-version-app',
+                scripts: { start: 'bun run index.ts' }
+            }, null, 2));
+
+            await run(async ({ encapsulate, CapsulePropertyTypes, makeImportStack }: any) => {
+                const spine = await encapsulate({
+                    '#@stream44.studio/encapsulate/spine-contracts/CapsuleSpineContract.v0': {
+                        '#@stream44.studio/encapsulate/structs/Capsule': {},
+                        '#': {
+                            project: {
+                                type: CapsulePropertyTypes.Mapping,
+                                value: './Project',
+                                options: {
+                                    '@stream44.studio/t44-docker.com/caps/ImageContext': {
+                                        '#': {
+                                            organization: 'test-docker-com',
+                                            repository: 'project-tagversion-noversion-test',
+                                            verbose: false
+                                        },
+                                    },
+                                },
+                            },
+                        }
+                    }
+                }, { importMeta: import.meta, importStack: makeImportStack(), capsuleName: '@stream44.studio/t44-docker.com/caps/Project.test.tagversion-noversion' })
+                return { spine }
+            }, async ({ spine, apis }: any) => {
+                const project = apis[spine.capsuleSourceLineRef].project
+
+                project.image.context.appBaseDir = appDir;
+                project.image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
+
+                let errorThrown = false;
+                let errorMessage = '';
+                try {
+                    await project.buildDev({ tagVersion: true });
+                } catch (err: any) {
+                    errorThrown = true;
+                    errorMessage = err.message;
+                }
+
+                expect(errorThrown).toBe(true);
+                expect(errorMessage).toContain('no "version" field');
+
+                // Cleanup any images that might have been created
+                const tags = await project.image.getTags({
+                    organization: 'test-docker-com',
+                    repository: 'project-tagversion-noversion-test'
+                });
+                for (const tag of tags) {
+                    await project.image.removeImage({ image: tag.tag, force: true }).catch(() => { });
+                }
+            }, { importMeta: import.meta, runFromSnapshot: false })
+        }, 120000);
+    });
+
+    describe('buildDev with tagLatest and tagVersion combined', () => {
+        it('should tag image with both -latest and version tags', async () => {
+            const appDir = join(workbenchDir, 'project-tagboth-test');
+            await createSampleApp(appDir);
+
+            await run(async ({ encapsulate, CapsulePropertyTypes, makeImportStack }: any) => {
+                const spine = await encapsulate({
+                    '#@stream44.studio/encapsulate/spine-contracts/CapsuleSpineContract.v0': {
+                        '#@stream44.studio/encapsulate/structs/Capsule': {},
+                        '#': {
+                            project: {
+                                type: CapsulePropertyTypes.Mapping,
+                                value: './Project',
+                                options: {
+                                    '@stream44.studio/t44-docker.com/caps/ImageContext': {
+                                        '#': {
+                                            organization: 'test-docker-com',
+                                            repository: 'project-tagboth-test',
+                                            verbose: false
+                                        },
+                                    },
+                                },
+                            },
+                        }
+                    }
+                }, { importMeta: import.meta, importStack: makeImportStack(), capsuleName: '@stream44.studio/t44-docker.com/caps/Project.test.tagboth' })
+                return { spine }
+            }, async ({ spine, apis }: any) => {
+                const project = apis[spine.capsuleSourceLineRef].project
+
+                project.image.context.appBaseDir = appDir;
+                project.image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
+
+                const buildResult = await project.buildDev({ tagLatest: true, tagVersion: true });
+                expect(buildResult.imageTag).toBeTruthy();
+
+                const currentArch = project.cli.getCurrentPlatformArch();
+
+                // Verify the -latest tag exists
+                const latestTag = project.image.context.getLatestImageTag({
+                    variant: 'alpine',
+                    arch: currentArch
+                });
+                const latestExists = await project.image.doesImageTagExist(latestTag);
+                expect(latestExists).toBe(true);
+
+                // Verify the version tag exists
+                const versionTag = project.image.context.getVersionImageTag({
+                    variant: 'alpine',
+                    arch: currentArch,
+                    version: '0.1.0'
+                });
+                const versionExists = await project.image.doesImageTagExist(versionTag);
+                expect(versionExists).toBe(true);
+
+                // Cleanup
+                await project.image.removeImage({ image: buildResult.imageTag, force: true }).catch(() => { });
+                await project.image.removeImage({ image: latestTag, force: true }).catch(() => { });
+                await project.image.removeImage({ image: versionTag, force: true }).catch(() => { });
+            }, { importMeta: import.meta, runFromSnapshot: false })
+        }, 120000);
+    });
+
+    describe('buildDistribution with buildVariants', () => {
+        it('should only build enabled variants (alpine only by default)', async () => {
+            const appDir = join(workbenchDir, 'project-buildvariants-test');
+            await createSampleApp(appDir);
+
+            await run(async ({ encapsulate, CapsulePropertyTypes, makeImportStack }: any) => {
+                const spine = await encapsulate({
+                    '#@stream44.studio/encapsulate/spine-contracts/CapsuleSpineContract.v0': {
+                        '#@stream44.studio/encapsulate/structs/Capsule': {},
+                        '#': {
+                            project: {
+                                type: CapsulePropertyTypes.Mapping,
+                                value: './Project',
+                                options: {
+                                    '@stream44.studio/t44-docker.com/caps/ImageContext': {
+                                        '#': {
+                                            organization: 'test-docker-com',
+                                            repository: 'project-buildvariants-test',
+                                            verbose: false
+                                        },
+                                    },
+                                },
+                            },
+                        }
+                    }
+                }, { importMeta: import.meta, importStack: makeImportStack(), capsuleName: '@stream44.studio/t44-docker.com/caps/Project.test.buildvariants' })
+                return { spine }
+            }, async ({ spine, apis }: any) => {
+                const project = apis[spine.capsuleSourceLineRef].project
+
+                project.image.context.appBaseDir = appDir;
+                project.image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
+
+                // Default buildVariants: { alpine: true, distroless: false }
+                const results = await project.buildDistribution();
+
+                // Should only build alpine (not distroless), for all archs
+                const archCount = Object.keys(project.cli.DOCKER_ARCHS).length;
+                expect(results.length).toBe(archCount);
+                for (const result of results) {
+                    expect(result.imageTag).toContain('alpine');
+                    expect(result.imageTag).not.toContain('distroless');
+                }
+
+                // Cleanup
+                for (const result of results) {
+                    await project.image.removeImage({ image: result.imageTag, force: true }).catch(() => { });
+                }
+            }, { importMeta: import.meta, runFromSnapshot: false })
+        }, 120000);
+
+        it('should build both variants when both enabled', async () => {
+            const appDir = join(workbenchDir, 'project-buildvariants-both-test');
+            await createSampleApp(appDir);
+
+            await run(async ({ encapsulate, CapsulePropertyTypes, makeImportStack }: any) => {
+                const spine = await encapsulate({
+                    '#@stream44.studio/encapsulate/spine-contracts/CapsuleSpineContract.v0': {
+                        '#@stream44.studio/encapsulate/structs/Capsule': {},
+                        '#': {
+                            project: {
+                                type: CapsulePropertyTypes.Mapping,
+                                value: './Project',
+                                options: {
+                                    '@stream44.studio/t44-docker.com/caps/ImageContext': {
+                                        '#': {
+                                            organization: 'test-docker-com',
+                                            repository: 'project-buildvariants-both-test',
+                                            buildVariants: { alpine: true, distroless: true },
+                                            verbose: false
+                                        },
+                                    },
+                                },
+                            },
+                        }
+                    }
+                }, { importMeta: import.meta, importStack: makeImportStack(), capsuleName: '@stream44.studio/t44-docker.com/caps/Project.test.buildvariants-both' })
+                return { spine }
+            }, async ({ spine, apis }: any) => {
+                const project = apis[spine.capsuleSourceLineRef].project
+
+                project.image.context.appBaseDir = appDir;
+                project.image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
+
+                const results = await project.buildDistribution();
+
+                // Should build both variants for all archs
+                const archCount = Object.keys(project.cli.DOCKER_ARCHS).length;
+                const variantCount = 2;
+                expect(results.length).toBe(archCount * variantCount);
+
+                const alpineResults = results.filter((r: any) => r.imageTag.includes('alpine'));
+                const distrolessResults = results.filter((r: any) => r.imageTag.includes('distroless'));
+                expect(alpineResults.length).toBe(archCount);
+                expect(distrolessResults.length).toBe(archCount);
+
+                // Cleanup
+                for (const result of results) {
+                    await project.image.removeImage({ image: result.imageTag, force: true }).catch(() => { });
+                }
+            }, { importMeta: import.meta, runFromSnapshot: false })
+        }, 180000);
+    });
+
     describe('retagImages', () => {
         it('should retag images from source to target org/repo', async () => {
             const appDir = join(workbenchDir, 'project-retag-test');

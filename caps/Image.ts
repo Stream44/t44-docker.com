@@ -255,10 +255,13 @@ export async function capsule({
                             }
                         }
 
-                        // Copy Dockerfile template to build context
-                        const dockerfileSrc = join(templateDir, variant.dockerfile);
+                        // Copy Dockerfile to build context
+                        const customDockerfile = this.context.dockerfile;
+                        const dockerfileSrc = customDockerfile
+                            ? (isAbsolute(customDockerfile) ? customDockerfile : join(appBaseDir, customDockerfile))
+                            : join(templateDir, variant.dockerfile);
                         const dockerfileDest = join(buildContextDir, 'Dockerfile');
-                        if (this.verbose) console.log(`  Copying Dockerfile template: ${variant.dockerfile}`);
+                        if (this.verbose) console.log(`  Copying Dockerfile: ${dockerfileSrc}`);
                         await cp(dockerfileSrc, dockerfileDest);
 
                         // Handle file copying
@@ -332,12 +335,14 @@ export async function capsule({
                         arch?: string;
                         files?: FilesSpec;
                         tagLatest?: boolean;
+                        tagVersion?: boolean;
                         attestations?: { sbom?: boolean; provenance?: boolean };
                     }): Promise<{ imageTag: string }> {
                         const variant = opts?.variant ?? this.context.variant;
                         const arch = opts?.arch ?? this.context.arch;
                         const files = opts?.files ?? this.context.files;
                         const shouldTagLatest = opts?.tagLatest ?? this.context.tagLatest;
+                        const shouldTagVersion = opts?.tagVersion ?? this.context.tagVersion;
                         const attestations = opts?.attestations ?? this.context.attestations;
 
                         if (!variant || !arch) {
@@ -345,7 +350,8 @@ export async function capsule({
                         }
 
                         if (this.context.verbose) {
-                            console.log(`\nBuilding ${variant} for ${arch}...`);
+                            const archInfo = this.cli.DOCKER_ARCHS[arch as keyof typeof this.cli.DOCKER_ARCHS];
+                            console.log(`\nBuilding ${variant} for ${archInfo?.os ?? 'linux'}/${archInfo?.arch ?? arch}...`);
                         }
 
                         const variantInfo = DOCKERFILE_VARIANTS[variant as keyof typeof DOCKERFILE_VARIANTS];
@@ -364,11 +370,12 @@ export async function capsule({
 
                         const imageTag = this.context.getImageTag({ variant, arch });
 
-                        // Build Docker image
+                        // Build Docker image with platform flag
                         await this.buildImage({
                             context: buildContextDir,
                             dockerfile: join(buildContextDir, 'Dockerfile'),
                             tag: imageTag,
+                            platform: `${archInfo.os}/${archInfo.arch}`,
                             attestations,
                         });
 
@@ -380,6 +387,33 @@ export async function capsule({
                         if (shouldTagLatest) {
                             const latestTag = this.context.getLatestImageTag({ variant, arch });
                             await this.cli.tagImage({ sourceImage: imageTag, targetImage: latestTag });
+                        }
+
+                        if (shouldTagVersion) {
+                            const packageJsonPath = join(buildContextDir, 'package.json');
+                            let version: string | undefined;
+                            try {
+                                await access(packageJsonPath, constants.F_OK);
+                                const packageJsonContent = await readFile(packageJsonPath, 'utf-8');
+                                const packageJson = JSON.parse(packageJsonContent);
+                                version = packageJson.version;
+                            } catch (err) {
+                                console.error(`[tagVersion] Error: Cannot find package.json at ${packageJsonPath}`);
+                                console.error(`[tagVersion] Ensure a package.json file exists in the build context root with a valid "version" field.`);
+                                throw new Error(`tagVersion failed: package.json not found at ${packageJsonPath}`);
+                            }
+
+                            if (!version) {
+                                console.error(`[tagVersion] Error: No "version" field found in ${packageJsonPath}`);
+                                console.error(`[tagVersion] Add a "version" field to your package.json (e.g., "version": "1.0.0")`);
+                                throw new Error(`tagVersion failed: no "version" field in package.json at ${packageJsonPath}`);
+                            }
+
+                            const versionTag = this.context.getVersionImageTag({ variant, arch, version });
+                            await this.cli.tagImage({ sourceImage: imageTag, targetImage: versionTag });
+                            if (this.context.verbose) {
+                                console.log(`   Tagged with version: ${versionTag}`);
+                            }
                         }
 
                         return { imageTag };
@@ -481,6 +515,103 @@ export async function capsule({
                     }
                 },
 
+                /**
+                 * Build and optionally push a multi-platform image using docker buildx.
+                 * Uses `docker buildx build --platform linux/amd64,linux/arm64 [--push] -t tag1 [-t tag2] .`
+                 * When push is true, this creates a proper multi-arch manifest on the registry
+                 * with NO separate per-arch tags — only the manifest tags appear.
+                 */
+                buildMultiPlatform: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, opts: {
+                        variant: string;
+                        tags: string[];
+                        push?: boolean;
+                        files?: FilesSpec;
+                        attestations?: { sbom?: boolean; provenance?: boolean };
+                        buildArgs?: Record<string, string>;
+                    }): Promise<{ tags: string[] }> {
+                        const { variant, tags, push, files, attestations, buildArgs } = opts;
+
+                        if (!variant) {
+                            throw new Error('variant must be set for buildMultiPlatform');
+                        }
+                        if (!tags || tags.length === 0) {
+                            throw new Error('at least one tag must be provided for buildMultiPlatform');
+                        }
+
+                        const variantInfo = DOCKERFILE_VARIANTS[variant as keyof typeof DOCKERFILE_VARIANTS];
+                        if (!variantInfo) {
+                            throw new Error(`unknown variant: ${variant}`);
+                        }
+
+                        // Build platforms string from DOCKER_ARCHS
+                        const platforms = Object.values(this.cli.DOCKER_ARCHS)
+                            .map((a: any) => `${a.os}/${a.arch}`)
+                            .join(',');
+
+                        if (this.context.verbose) {
+                            console.log(`\nBuilding ${variant} for ${platforms}${push ? ' (with push)' : ''}...`);
+                        }
+
+                        // Prepare build context using the first arch (context is arch-independent for buildx)
+                        const firstArchKey = Object.keys(this.cli.DOCKER_ARCHS)[0];
+                        const firstArch = this.cli.DOCKER_ARCHS[firstArchKey];
+                        const buildContextDir = this.context.getBuildContextDir({ variant });
+
+                        await this.prepareBuildContext({
+                            appBaseDir: this.context.appBaseDir,
+                            buildContextDir,
+                            templateDir: this.context.templateDir,
+                            variant: variantInfo,
+                            arch: firstArch,
+                            files: files ?? this.context.files,
+                            buildScriptName: this.context.buildScriptName,
+                        });
+
+                        // Build args for docker buildx build
+                        const args = ['buildx', 'build'];
+                        args.push('--platform', platforms);
+
+                        const dockerfilePath = join(buildContextDir, 'Dockerfile');
+                        args.push('-f', dockerfilePath);
+
+                        for (const tag of tags) {
+                            args.push('-t', tag);
+                        }
+
+                        if (push) {
+                            args.push('--push');
+                        }
+
+                        if (buildArgs) {
+                            for (const [key, value] of Object.entries(buildArgs)) {
+                                args.push('--build-arg', `${key}=${value}`);
+                            }
+                        }
+
+                        if (attestations?.sbom) {
+                            args.push('--attest', 'type=sbom');
+                        }
+                        if (attestations?.provenance) {
+                            args.push('--attest', 'type=provenance,mode=max');
+                        }
+
+                        args.push(buildContextDir);
+
+                        await this.cli.exec(args);
+
+                        if (this.context.verbose) {
+                            console.log(`✅ Built multi-platform ${variant} (${platforms})`);
+                            for (const tag of tags) {
+                                console.log(`   ${tag}${push ? ' (pushed)' : ''}`);
+                            }
+                        }
+
+                        return { tags };
+                    }
+                },
+
                 // --- Image-specific CLI methods (not shared) ---
 
                 /**
@@ -492,11 +623,12 @@ export async function capsule({
                         dockerfile?: string;
                         context: string;
                         tag: string;
+                        platform?: string;
                         buildArgs?: Record<string, string>;
                         noCache?: boolean;
                         attestations?: { sbom?: boolean; provenance?: boolean };
                     }): Promise<string> {
-                        const { dockerfile = 'Dockerfile', context, tag, buildArgs, noCache, attestations } = options;
+                        const { dockerfile = 'Dockerfile', context, tag, platform, buildArgs, noCache, attestations } = options;
 
                         const args = ['build'];
 
@@ -506,6 +638,10 @@ export async function capsule({
                         }
 
                         args.push('-t', tag);
+
+                        if (platform) {
+                            args.push('--platform', platform);
+                        }
 
                         if (noCache) {
                             args.push('--no-cache');

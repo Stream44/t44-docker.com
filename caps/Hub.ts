@@ -357,6 +357,248 @@ export async function capsule({
                     }
                 },
 
+                /**
+                 * Push a single Docker image to the registry
+                 */
+                pushImage: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        image: string;
+                        cli: any;
+                    }): Promise<string> {
+                        const { image, cli } = options;
+                        if (!cli) {
+                            throw new Error('cli capsule must be provided to pushImage');
+                        }
+
+                        if (this.verbose) {
+                            console.log(`[Hub] Pushing image: ${image}`);
+                        }
+
+                        const result = await cli.exec(['push', image], { retry: true });
+
+                        if (this.verbose) {
+                            console.log(`[Hub] Push complete: ${image}`);
+                        }
+
+                        return result;
+                    }
+                },
+
+                /**
+                 * Create and push a multi-arch manifest list.
+                 * This groups multiple arch-specific images under one arch-agnostic tag.
+                 * Docker Hub will serve the correct arch to consumers automatically.
+                 *
+                 * Example: createAndPushManifest({
+                 *   manifestTag: 'myorg/myapp:1.0.0-alpine',
+                 *   archImages: ['myorg/myapp:1.0.0-alpine-arm64', 'myorg/myapp:1.0.0-alpine-amd64'],
+                 *   cli: cliCapsule
+                 * })
+                 */
+                createAndPushManifest: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        manifestTag: string;
+                        archImages: string[];
+                        cli: any;
+                    }): Promise<string> {
+                        const { manifestTag, archImages, cli } = options;
+                        if (!cli) {
+                            throw new Error('cli capsule must be provided to createAndPushManifest');
+                        }
+                        if (!archImages || archImages.length === 0) {
+                            throw new Error('at least one arch-specific image must be provided');
+                        }
+
+                        if (this.verbose) {
+                            console.log(`[Hub] Creating manifest: ${manifestTag}`);
+                            console.log(`[Hub]   Arch images: ${archImages.join(', ')}`);
+                        }
+
+                        // Remove existing manifest if present (--amend would also work but rm is cleaner)
+                        try {
+                            await cli.exec(['manifest', 'rm', manifestTag]);
+                        } catch {
+                            // Manifest doesn't exist yet, that's fine
+                        }
+
+                        // Create the manifest list
+                        await cli.exec(['manifest', 'create', manifestTag, ...archImages]);
+
+                        if (this.verbose) {
+                            console.log(`[Hub] Pushing manifest: ${manifestTag}`);
+                        }
+
+                        // Push the manifest list
+                        const result = await cli.exec(['manifest', 'push', manifestTag], { retry: true });
+
+                        if (this.verbose) {
+                            console.log(`[Hub] Manifest pushed: ${manifestTag}`);
+                        }
+
+                        return result;
+                    }
+                },
+
+                /**
+                 * Push all arch-specific images for a variant, then create and push
+                 * a multi-arch manifest list under the arch-agnostic hub tag.
+                 *
+                 * This is the standard Docker Hub workflow:
+                 * 1. Push org/repo:VERSION-variant-arm64
+                 * 2. Push org/repo:VERSION-variant-amd64
+                 * 3. Create manifest org/repo:VERSION-variant pointing to both
+                 * 4. Push manifest
+                 *
+                 * Consumers pulling org/repo:VERSION-variant get the correct arch automatically.
+                 */
+                pushVariantManifest: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        imageContext: any;
+                        variant: string;
+                        version?: string;
+                        tagLatest?: boolean;
+                        cli: any;
+                    }): Promise<{ manifestTag: string; archImages: string[] }> {
+                        const { imageContext, variant, version, tagLatest, cli } = options;
+                        if (!cli) {
+                            throw new Error('cli capsule must be provided to pushVariantManifest');
+                        }
+
+                        const archKeys = Object.keys(cli.DOCKER_ARCHS);
+                        const archImages: string[] = [];
+
+                        // Push each arch-specific image
+                        for (const archKey of archKeys) {
+                            let localTag: string;
+                            if (version) {
+                                localTag = imageContext.getVersionImageTag({ variant, arch: archKey, version });
+                            } else {
+                                localTag = imageContext.getImageTag({ variant, arch: archKey });
+                            }
+                            await this.pushImage({ image: localTag, cli });
+                            archImages.push(localTag);
+                        }
+
+                        // Create and push version manifest (arch-agnostic)
+                        let manifestTag: string;
+                        if (version) {
+                            manifestTag = imageContext.getMultiArchManifestVersionImageTag({ variant, version });
+                            await this.createAndPushManifest({ manifestTag, archImages, cli });
+                        } else {
+                            manifestTag = archImages[0]; // fallback
+                        }
+
+                        // Optionally create and push latest manifest
+                        if (tagLatest) {
+                            const latestManifestTag = imageContext.getMultiArchManifestLatestImageTag({ variant });
+                            await this.createAndPushManifest({ manifestTag: latestManifestTag, archImages, cli });
+                        }
+
+                        return { manifestTag, archImages };
+                    }
+                },
+
+                /**
+                 * Build and push a project's multi-platform images to the registry.
+                 * Uses docker buildx to build all architectures and push proper
+                 * multi-arch manifests in one step. No per-arch tags appear on the registry.
+                 */
+                pushProject: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        project: any;
+                        version?: string;
+                        tagLatest?: boolean;
+                    }): Promise<{ results: { tags: string[] }[] }> {
+                        const { project, tagLatest } = options;
+                        if (!project) {
+                            throw new Error('project capsule must be provided to pushProject');
+                        }
+
+                        const cli = project.cli;
+
+                        // Login to registry
+                        await this.loginCli({ cli });
+
+                        // Use project.publishDistribution which handles buildx build+push
+                        const results = await project.publishDistribution({
+                            version: options.version,
+                            tagLatest,
+                        });
+
+                        return { results };
+                    }
+                },
+
+                /**
+                 * Verify that all expected tags for a project exist on the registry.
+                 * Checks version tags and optionally latest tags for all enabled variants.
+                 */
+                isProjectPushed: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        project: any;
+                        version?: string;
+                        tagLatest?: boolean;
+                    }): Promise<{ pushed: boolean; expected: string[]; found: string[]; missing: string[] }> {
+                        const { project, tagLatest } = options;
+                        if (!project) {
+                            throw new Error('project capsule must be provided to isProjectPushed');
+                        }
+
+                        const ctx = project.image.context;
+
+                        // Resolve version
+                        const version = options.version ?? await ctx.getVersion();
+
+                        // Determine which variants to check
+                        const variantKeys = ctx.variant
+                            ? [ctx.variant]
+                            : Object.keys(ctx.DOCKERFILE_VARIANTS).filter(
+                                (v: string) => ctx.buildVariants?.[v] === true
+                            );
+
+                        // Build list of expected tags
+                        const expected: string[] = [];
+                        for (const variantKey of variantKeys) {
+                            if (version) {
+                                const versionTag = ctx.getMultiArchManifestVersionImageTag({ variant: variantKey, version });
+                                expected.push(versionTag.split(':')[1]);
+                            }
+                            if (tagLatest) {
+                                const latestTag = ctx.getMultiArchManifestLatestImageTag({ variant: variantKey });
+                                expected.push(latestTag.split(':')[1]);
+                            }
+                        }
+
+                        // Get actual tags from registry
+                        const remoteTags = await this.getTags({
+                            repository: ctx.repository,
+                            namespace: ctx.organization,
+                        });
+
+                        const found: string[] = [];
+                        const missing: string[] = [];
+                        for (const tag of expected) {
+                            if (remoteTags.includes(tag)) {
+                                found.push(tag);
+                            } else {
+                                missing.push(tag);
+                            }
+                        }
+
+                        return {
+                            pushed: missing.length === 0,
+                            expected,
+                            found,
+                            missing,
+                        };
+                    }
+                },
+
             }
         }
     }, {

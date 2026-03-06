@@ -82,6 +82,7 @@ export async function capsule({
                     value: async function (this: any, options?: {
                         files?: Record<string, any>;
                         tagLatest?: boolean;
+                        tagVersion?: boolean;
                         attestations?: { sbom?: boolean; provenance?: boolean };
                     }): Promise<{ imageTag: string }> {
                         const ctx = this.image.context;
@@ -94,6 +95,7 @@ export async function capsule({
                             arch: this.cli.getCurrentPlatformArch(),
                             files,
                             tagLatest: options?.tagLatest,
+                            tagVersion: options?.tagVersion,
                             attestations: options?.attestations ?? ctx.attestations,
                         });
                     }
@@ -107,6 +109,7 @@ export async function capsule({
                     value: async function (this: any, options?: {
                         files?: Record<string, any>;
                         tagLatest?: boolean;
+                        tagVersion?: boolean;
                         attestations?: { sbom?: boolean; provenance?: boolean };
                     }): Promise<{ imageTag: string }[]> {
                         const ctx = this.image.context;
@@ -121,7 +124,9 @@ export async function capsule({
                             : Object.keys(this.cli.DOCKER_ARCHS);
                         const variantKeys = ctx.variant
                             ? [ctx.variant]
-                            : Object.keys(ctx.DOCKERFILE_VARIANTS);
+                            : Object.keys(ctx.DOCKERFILE_VARIANTS).filter(
+                                (v: string) => ctx.buildVariants?.[v] === true
+                            );
 
                         for (const variantKey of variantKeys) {
                             for (const archKey of archKeys) {
@@ -130,9 +135,70 @@ export async function capsule({
                                     arch: archKey,
                                     files,
                                     tagLatest: options?.tagLatest,
+                                    tagVersion: options?.tagVersion,
                                     attestations: options?.attestations ?? ctx.attestations,
                                 }));
                             }
+                        }
+
+                        return results;
+                    }
+                },
+
+                /**
+                 * Build and push multi-platform distribution images using docker buildx.
+                 * For each enabled variant, builds for all architectures and pushes a
+                 * proper multi-arch manifest to the registry in one step.
+                 * Only manifest tags appear on the registry (no per-arch tags).
+                 */
+                publishDistribution: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options?: {
+                        files?: Record<string, any>;
+                        version?: string;
+                        tagLatest?: boolean;
+                        attestations?: { sbom?: boolean; provenance?: boolean };
+                    }): Promise<{ tags: string[] }[]> {
+                        const ctx = this.image.context;
+                        const files = (ctx.files || options?.files)
+                            ? { ...ctx.files, ...options?.files }
+                            : undefined;
+
+                        const version = options?.version ?? await ctx.getVersion();
+                        const variantKeys = ctx.variant
+                            ? [ctx.variant]
+                            : Object.keys(ctx.DOCKERFILE_VARIANTS).filter(
+                                (v: string) => ctx.buildVariants?.[v] === true
+                            );
+
+                        const results: { tags: string[] }[] = [];
+
+                        for (const variantKey of variantKeys) {
+                            const tags: string[] = [];
+
+                            // Version tag: org/repo:VERSION-variant
+                            if (version) {
+                                tags.push(ctx.getMultiArchManifestVersionImageTag({ variant: variantKey, version }));
+                            }
+
+                            // Latest tag: org/repo:latest-variant
+                            if (options?.tagLatest) {
+                                tags.push(ctx.getMultiArchManifestLatestImageTag({ variant: variantKey }));
+                            }
+
+                            if (tags.length === 0) {
+                                throw new Error(`No tags to build for variant ${variantKey}. Provide a version or set tagLatest.`);
+                            }
+
+                            const result = await this.image.buildMultiPlatform({
+                                variant: variantKey,
+                                tags,
+                                push: true,
+                                files,
+                                attestations: options?.attestations ?? ctx.attestations,
+                            });
+
+                            results.push(result);
                         }
 
                         return results;

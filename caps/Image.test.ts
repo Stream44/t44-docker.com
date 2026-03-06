@@ -196,6 +196,47 @@ describe('Image Capsule', () => {
         }, 120000);
     });
 
+    describe('buildVariant - all arch/variant combinations', () => {
+        const variants = Object.keys(image.DOCKERFILE_VARIANTS);
+        const archs = Object.keys(image.cli.DOCKER_ARCHS);
+
+        for (const variant of variants) {
+            for (const arch of archs) {
+                it(`should build ${variant}/${arch} with correct platform`, async () => {
+                    const appDir = join(workbenchDir, `build-${variant}-${arch}`);
+                    await createSampleApp(appDir);
+
+                    image.context.organization = 'test-docker-com';
+                    image.context.repository = `image-arch-test-${variant}-${arch}`;
+                    image.context.appBaseDir = appDir;
+                    image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
+                    image.context.verbose = false;
+
+                    const result = await image.buildVariant({
+                        variant,
+                        arch,
+                    });
+
+                    expect(result.imageTag).toBeTruthy();
+                    expect(result.imageTag).toContain(`test-docker-com/image-arch-test-${variant}-${arch}:${variant}-`);
+
+                    // Verify the image was built with the correct architecture
+                    const inspectResult = await image.inspectImage({ image: result.imageTag });
+                    const inspectData = JSON.parse(inspectResult);
+                    const imageArch = inspectData[0]?.Architecture;
+                    const imageOs = inspectData[0]?.Os;
+
+                    const expectedArchInfo = image.cli.DOCKER_ARCHS[arch as keyof typeof image.cli.DOCKER_ARCHS];
+                    expect(imageOs).toBe(expectedArchInfo.os);
+                    expect(imageArch).toBe(expectedArchInfo.arch);
+
+                    // Cleanup
+                    await image.removeImage({ image: result.imageTag, force: true });
+                }, 120000);
+            }
+        }
+    });
+
     describe('copySpecifiedFiles', () => {
         it('should copy JSON objects as files', async () => {
             const buildDir = join(workbenchDir, 'copy-json-test');
