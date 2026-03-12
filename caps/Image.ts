@@ -516,10 +516,10 @@ export async function capsule({
                 },
 
                 /**
-                 * Build and optionally push a multi-platform image using docker buildx.
-                 * Uses `docker buildx build --platform linux/amd64,linux/arm64 [--push] -t tag1 [-t tag2] .`
-                 * When push is true, this creates a proper multi-arch manifest on the registry
-                 * with NO separate per-arch tags — only the manifest tags appear.
+                 * Build and optionally push a multi-platform image.
+                 * Builds each architecture separately (so arch-dependent file callbacks
+                 * receive the correct archDir), pushes per-arch images, then creates
+                 * and pushes multi-arch manifest lists for each requested tag.
                  */
                 buildMultiPlatform: {
                     type: CapsulePropertyTypes.Function,
@@ -531,7 +531,7 @@ export async function capsule({
                         attestations?: { sbom?: boolean; provenance?: boolean };
                         buildArgs?: Record<string, string>;
                     }): Promise<{ tags: string[] }> {
-                        const { variant, tags, push, files, attestations, buildArgs } = opts;
+                        const { variant, tags, push, files, attestations } = opts;
 
                         if (!variant) {
                             throw new Error('variant must be set for buildMultiPlatform');
@@ -545,7 +545,7 @@ export async function capsule({
                             throw new Error(`unknown variant: ${variant}`);
                         }
 
-                        // Build platforms string from DOCKER_ARCHS
+                        const archKeys = Object.keys(this.cli.DOCKER_ARCHS);
                         const platforms = Object.values(this.cli.DOCKER_ARCHS)
                             .map((a: any) => `${a.os}/${a.arch}`)
                             .join(',');
@@ -554,52 +554,33 @@ export async function capsule({
                             console.log(`\nBuilding ${variant} for ${platforms}${push ? ' (with push)' : ''}...`);
                         }
 
-                        // Prepare build context using the first arch (context is arch-independent for buildx)
-                        const firstArchKey = Object.keys(this.cli.DOCKER_ARCHS)[0];
-                        const firstArch = this.cli.DOCKER_ARCHS[firstArchKey];
-                        const buildContextDir = this.context.getBuildContextDir({ variant });
+                        // Build each architecture separately so that arch-dependent file
+                        // callbacks (e.g. files: { 'csrv': ({ archDir }) => ... }) receive
+                        // the correct archDir for each platform.
+                        const perArchImages: string[] = [];
 
-                        await this.prepareBuildContext({
-                            appBaseDir: this.context.appBaseDir,
-                            buildContextDir,
-                            templateDir: this.context.templateDir,
-                            variant: variantInfo,
-                            arch: firstArch,
-                            files: files ?? this.context.files,
-                            buildScriptName: this.context.buildScriptName,
-                        });
+                        for (const archKey of archKeys) {
+                            const result = await this.buildVariant({
+                                variant,
+                                arch: archKey,
+                                files,
+                                attestations,
+                            });
+                            perArchImages.push(result.imageTag);
 
-                        // Build args for docker buildx build
-                        const args = ['buildx', 'build'];
-                        args.push('--platform', platforms);
-
-                        const dockerfilePath = join(buildContextDir, 'Dockerfile');
-                        args.push('-f', dockerfilePath);
-
-                        for (const tag of tags) {
-                            args.push('-t', tag);
-                        }
-
-                        if (push) {
-                            args.push('--push');
-                        }
-
-                        if (buildArgs) {
-                            for (const [key, value] of Object.entries(buildArgs)) {
-                                args.push('--build-arg', `${key}=${value}`);
+                            if (push) {
+                                await this.cli.exec(['push', result.imageTag]);
                             }
                         }
 
-                        if (attestations?.sbom) {
-                            args.push('--attest', 'type=sbom');
+                        if (push) {
+                            // Create and push a manifest list for each requested tag,
+                            // pointing to the per-arch images we just pushed.
+                            for (const tag of tags) {
+                                await this.cli.exec(['manifest', 'create', '--amend', tag, ...perArchImages]);
+                                await this.cli.exec(['manifest', 'push', tag]);
+                            }
                         }
-                        if (attestations?.provenance) {
-                            args.push('--attest', 'type=provenance,mode=max');
-                        }
-
-                        args.push(buildContextDir);
-
-                        await this.cli.exec(args);
 
                         if (this.context.verbose) {
                             console.log(`✅ Built multi-platform ${variant} (${platforms})`);

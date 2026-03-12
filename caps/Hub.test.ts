@@ -106,6 +106,18 @@ describe('Docker Hub Capsule', function () {
         expect(tag).toBe('latest');
     })
 
+    it('getTag() returns metadata for a specific tag', async function () {
+        const tagMeta = await hub.getTag({
+            repository: 'alpine',
+            namespace: 'library',
+            tag: 'latest',
+        });
+
+        expect(tagMeta).toBeDefined();
+        expect(tagMeta.name).toBe('latest');
+        expect(tagMeta.last_updated || tagMeta.tag_last_pushed || tagMeta.last_pushed).toBeTruthy();
+    })
+
     it('ensureTagged() throws for non-existent tag', async function () {
         await expect(hub.ensureTagged({
             repository: 'alpine',

@@ -194,6 +194,28 @@ export async function capsule({
                 },
 
                 /**
+                 * Get metadata for a specific tag in a repository
+                 */
+                getTag: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        repository: string;
+                        tag: string;
+                        namespace?: string;
+                    }): Promise<any> {
+                        const namespace = options.namespace || await this.getNamespace();
+                        const repository = options.repository;
+                        const tag = options.tag;
+
+                        return await this.apiCall({
+                            method: 'GET',
+                            path: `/v2/repositories/${namespace}/${repository}/tags/${tag}`,
+                            requireAuth: false,
+                        });
+                    }
+                },
+
+                /**
                  * Get repository statistics including pull count, star count, etc.
                  */
                 getStats: {

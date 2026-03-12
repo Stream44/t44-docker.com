@@ -528,6 +528,95 @@ console.log("READY");
         }, 180000);
     });
 
+    describe('buildMultiPlatform with arch-dependent files', () => {
+        it('should call files callback with correct archDir per architecture', async () => {
+            const appDir = join(workbenchDir, 'project-multiplatform-archfiles-test');
+            await createSampleApp(appDir);
+
+            // Create arch-specific marker files so we can verify each image gets the right one
+            const archDirs = ['linux-arm64', 'linux-x64'];
+            for (const archDir of archDirs) {
+                const dir = join(appDir, 'dist', archDir);
+                await mkdir(dir, { recursive: true });
+                await writeFile(join(dir, 'marker'), `arch=${archDir}\n`);
+            }
+
+            await run(async ({ encapsulate, CapsulePropertyTypes, makeImportStack }: any) => {
+                const spine = await encapsulate({
+                    '#@stream44.studio/encapsulate/spine-contracts/CapsuleSpineContract.v0': {
+                        '#@stream44.studio/encapsulate/structs/Capsule': {},
+                        '#': {
+                            project: {
+                                type: CapsulePropertyTypes.Mapping,
+                                value: './Project',
+                                options: {
+                                    '@stream44.studio/t44-docker.com/caps/ImageContext': {
+                                        '#': {
+                                            organization: 'test-docker-com',
+                                            repository: 'multiplatform-archfiles-test',
+                                            verbose: true,
+                                            files: {
+                                                'marker': ({ appBaseDir, archDir }: any) => {
+                                                    const p = join(appBaseDir, 'dist', archDir, 'marker');
+                                                    console.log(`  [files callback] archDir=${archDir} -> ${p}`);
+                                                    return p;
+                                                },
+                                                'package.json': { scripts: { start: 'cat /app/marker' } },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        }
+                    }
+                }, { importMeta: import.meta, importStack: makeImportStack(), capsuleName: '@stream44.studio/t44-docker.com/caps/Project.test.multiplatform-archfiles' })
+                return { spine }
+            }, async ({ spine, apis }: any) => {
+                const project = apis[spine.capsuleSourceLineRef].project;
+
+                project.image.context.appBaseDir = appDir;
+                project.image.context.buildContextBaseDir = join(appDir, '.~o/t44-docker.com');
+
+                // buildMultiPlatform builds each arch via buildVariant
+                const result = await project.image.buildMultiPlatform({
+                    variant: 'alpine',
+                    tags: ['test-docker-com/multiplatform-archfiles-test:test-multiarch'],
+                    push: false,
+                });
+
+                expect(result.tags.length).toBe(1);
+
+                // Verify each per-arch image contains the correct marker file
+                const archExpectations: Record<string, string> = {
+                    'linux-arm64': 'arch=linux-arm64',
+                    'linux-x64': 'arch=linux-x64',
+                };
+
+                for (const [archKey, expectedContent] of Object.entries(archExpectations)) {
+                    const archInfo = project.cli.DOCKER_ARCHS[archKey];
+                    const imageTag = project.image.context.getImageTag({ variant: 'alpine', arch: archKey });
+                    console.log(`  Checking ${imageTag} (${archInfo.arch}) for: ${expectedContent}`);
+
+                    const output = await project.cli.exec([
+                        'run', '--rm',
+                        '--platform', `${archInfo.os}/${archInfo.arch}`,
+                        '--entrypoint', '/bin/cat',
+                        imageTag,
+                        '/app/marker',
+                    ]);
+                    expect(output.trim()).toBe(expectedContent);
+                }
+
+                // Cleanup
+                for (const archKey of Object.keys(project.cli.DOCKER_ARCHS)) {
+                    const imageTag = project.image.context.getImageTag({ variant: 'alpine', arch: archKey });
+                    await project.image.removeImage({ image: imageTag, force: true }).catch(() => { });
+                }
+                await project.cli.exec(['rmi', 'test-docker-com/multiplatform-archfiles-test:test-multiarch']).catch(() => { });
+            }, { importMeta: import.meta, runFromSnapshot: false })
+        }, 180000);
+    });
+
     describe('retagImages', () => {
         it('should retag images from source to target org/repo', async () => {
             const appDir = join(workbenchDir, 'project-retag-test');

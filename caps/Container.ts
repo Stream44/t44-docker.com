@@ -161,6 +161,7 @@ export async function capsule({
                         forceColor?: boolean;
                         verbose?: boolean;
                         command?: string;
+                        logCommand?: boolean;
                     }): Promise<string> {
                         const ctx = containerContext ?? this.context.derive();
                         const {
@@ -168,7 +169,7 @@ export async function capsule({
                             removeOnExit: remove = false, interactive = false, tty = false,
                             workdir, network, platform, waitFor, waitTimeout = 30000,
                             showOutput = false, forceColor = true, verbose = false,
-                            command,
+                            command, logCommand = false,
                         } = ctx;
                         const self = this;
 
@@ -228,6 +229,18 @@ export async function capsule({
                             }
 
                             if (verbose) console.log(`[run] Full command: docker ${args.join(' ')}`);
+
+                            if (logCommand) {
+                                // Build a copy-pasteable command with env vars inline
+                                const shellArgs = args.map(arg => {
+                                    // Quote args that contain spaces or special chars
+                                    if (/[\s"'$`\\!]/.test(arg)) {
+                                        return `'${arg.replace(/'/g, "'\\''")}'`;
+                                    }
+                                    return arg;
+                                });
+                                console.log(`\n  📋 Copy-pasteable command:\n  docker ${shellArgs.join(' ').replace(/ -d /, ' ')}\n`);
+                            }
 
                             if (waitFor) {
                                 containerProc = Bun.spawn(['docker', ...args], { stdout: 'pipe', stderr: 'pipe' });
