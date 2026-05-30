@@ -64,6 +64,17 @@ export async function capsule({
                     type: CapsulePropertyTypes.Literal,
                     value: false,
                 },
+                /**
+                 * Optional command to run inside the container (overrides the
+                 * image's default CMD). Mirrors the `command` field accepted
+                 * by `Container.run(containerContext)` so that children of
+                 * `Container` can carry an image command through the context
+                 * without having to override `run`.
+                 */
+                command: {
+                    type: CapsulePropertyTypes.Literal,
+                    value: undefined as string | undefined,
+                },
 
                 derive: {
                     type: CapsulePropertyTypes.Function,
@@ -97,6 +108,7 @@ export async function capsule({
                             removeOnExit: this.removeOnExit,
                             verbose: this.verbose,
                             showOutput: this.showOutput,
+                            command: this.command,
                             ...overrides,
                         };
                     }

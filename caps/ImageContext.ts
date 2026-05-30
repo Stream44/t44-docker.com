@@ -87,6 +87,33 @@ export async function capsule({
                     type: CapsulePropertyTypes.Literal,
                     value: undefined as string | undefined,
                 },
+                /**
+                 * Upstream image reference (e.g. 'hello-world:latest') to pull,
+                 * retag, and push when re-publishing an existing image to a registry.
+                 */
+                sourceImage: {
+                    type: CapsulePropertyTypes.Literal,
+                    value: undefined as string | undefined,
+                },
+                /**
+                 * Plain tag string to apply to the image. Distinct from the
+                 * variant/arch-derived tags returned by `getImageTag()`.
+                 */
+                tag: {
+                    type: CapsulePropertyTypes.Literal,
+                    value: undefined as string | undefined,
+                },
+                /**
+                 * Name of a docker buildx builder to use for multi-platform builds.
+                 * When set, `Image.buildMultiPlatform` performs a single
+                 * `docker buildx build --builder <name> --platform <list> --push -t ... .`
+                 * invocation instead of looping per-arch with QEMU. Set up the builder
+                 * (including any remote SSH nodes) by calling `image.ensureBuilder(...)`.
+                 */
+                builder: {
+                    type: CapsulePropertyTypes.Literal,
+                    value: undefined as string | undefined,
+                },
 
                 DOCKERFILE_VARIANTS: {
                     type: CapsulePropertyTypes.Constant,

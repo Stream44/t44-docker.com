@@ -224,7 +224,7 @@ export async function capsule({
                         let signalName = '';
 
                         const stop = async () => {
-                            await this.container.cleanup(containerContext);
+                            await this.container.ensureStopped(containerContext);
                             this._devContainerId = undefined;
                         };
 
@@ -309,7 +309,7 @@ export async function capsule({
                         if (!this._devContainerId) {
                             throw new Error('Container must be started first using runDev()');
                         }
-                        await this.container.cleanup();
+                        await this.container.ensureStopped();
                         this._devContainerId = undefined;
                     }
                 },
@@ -353,9 +353,9 @@ export async function capsule({
                         if (!this.dispose || !this._devContainerId) return;
                         try {
                             const containerContext = this.getDevelopmentContainerConfig();
-                            await this.container.cleanup(containerContext);
+                            await this.container.ensureStopped(containerContext);
                         } catch (error) {
-                            if (this.image.context.verbose) console.log(`Warning: Failed to cleanup dev container on dispose: ${error}`);
+                            if (this.image.context.verbose) console.log(`Warning: Failed to stop dev container on dispose: ${error}`);
                         }
                         this._devContainerId = undefined;
                     }

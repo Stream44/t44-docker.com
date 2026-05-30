@@ -14,6 +14,10 @@ export async function capsule({
         '#@stream44.studio/encapsulate/spine-contracts/CapsuleSpineContract.v0': {
             '#@stream44.studio/encapsulate/structs/Capsule': {},
             '#': {
+                lib: {
+                    type: CapsulePropertyTypes.Mapping,
+                    value: '@stream44.studio/t44/caps/WorkspaceLib',
+                },
                 cli: {
                     type: CapsulePropertyTypes.Mapping,
                     value: './Cli',
@@ -40,26 +44,38 @@ export async function capsule({
 
                 ensureStopped: {
                     type: CapsulePropertyTypes.Function,
-                    value: async function (this: any, containerContext?: { name?: string; verbose?: boolean }): Promise<void> {
+                    value: async function (this: any, containerContext?: { name?: string; remove?: boolean; verbose?: boolean }): Promise<void> {
                         const name = containerContext?.name ?? this.context.name;
+                        const remove = containerContext?.remove ?? true;
                         const verbose = containerContext?.verbose ?? this.context.verbose;
                         if (!name) return;
                         try {
                             const output = await this.containers.list({
                                 all: true,
                                 filter: `name=${name}`,
-                                format: '{{.ID}}\t{{.Names}}',
+                                format: '{{.ID}}	{{.Names}}	{{.State}}',
                             });
                             const lines = (output as string).split('\n').filter((line: string) => line.trim());
                             for (const line of lines) {
-                                const [id, cname] = line.trim().split('\t');
+                                const [id, cname, state] = line.trim().split('\t');
                                 if (cname === name || cname === `/${name}`) {
-                                    if (verbose) console.log(`Found existing container with name ${name} (ID: ${id}), removing...`);
-                                    try {
-                                        await this.remove({ containerId: id, force: true });
-                                        if (verbose) console.log(`✅ Removed existing container: ${id}`);
-                                    } catch (error) {
-                                        if (verbose) console.log(`Warning: Failed to remove container ${id}: ${error}`);
+                                    if (state === 'running') {
+                                        if (verbose) console.log(`Found running container with name ${name} (ID: ${id}), stopping...`);
+                                        try {
+                                            await this.stop({ containerId: id });
+                                            if (verbose) console.log(`✅ Stopped container: ${id}`);
+                                        } catch (error) {
+                                            if (verbose) console.log(`Warning: Failed to stop container ${id}: ${error}`);
+                                        }
+                                    }
+                                    if (remove) {
+                                        if (verbose) console.log(`Removing container with name ${name} (ID: ${id})...`);
+                                        try {
+                                            await this.remove({ containerId: id, force: true });
+                                            if (verbose) console.log(`✅ Removed container: ${id}`);
+                                        } catch (error) {
+                                            if (verbose) console.log(`Warning: Failed to remove container ${id}: ${error}`);
+                                        }
                                     }
                                 }
                             }
@@ -69,7 +85,41 @@ export async function capsule({
                     }
                 },
 
+                /**
+                 * Cheap docker-state check: does a container with our
+                 * `context.name` currently report `State == "running"` in
+                 * `docker ps`? Protocol-agnostic — works for any container
+                 * regardless of whether it speaks HTTP. Use `isServing()`
+                 * when you also want to verify the process is responding on
+                 * its HTTP port.
+                 */
                 isRunning: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, containerContext?: { name?: string }): Promise<boolean> {
+                        const name = containerContext?.name ?? this.context.name;
+                        if (!name) return false;
+                        const output = await this.containers.list({
+                            all: true,
+                            filter: `name=${name}`,
+                            format: '{{.Names}}\t{{.State}}',
+                        });
+                        const lines = (output as string).split('\n').map((l: string) => l.trim()).filter(Boolean);
+                        for (const line of lines) {
+                            const [cname, state] = line.split('\t');
+                            const normalized = cname?.startsWith('/') ? cname.slice(1) : cname;
+                            if (normalized === name && state === 'running') return true;
+                        }
+                        return false;
+                    }
+                },
+
+                /**
+                 * Wait until the container is actually *serving* on its
+                 * host-exposed HTTP port. Stronger than `isRunning()` —
+                 * confirms the in-container process is up and responding.
+                 * Only meaningful for HTTP-speaking workloads.
+                 */
+                isServing: {
                     type: CapsulePropertyTypes.Function,
                     value: async function (this: any, containerContext?: { ports?: { internal: number; external: number }[]; verbose?: boolean; retryDelayMs?: number; requestTimeoutMs?: number; timeoutMs?: number }): Promise<boolean> {
                         if (!this._containerId) return false;
@@ -91,6 +141,61 @@ export async function capsule({
                     }
                 },
 
+                /**
+                 * Idempotently bring the container up. If it's already
+                 * running, no-op. If a stopped container with the same name
+                 * exists, `docker start` it (and wait for `waitFor` if set).
+                 * Otherwise call `run(...)`, which creates and starts a fresh
+                 * container using `containerContext` (or `this.context.derive()`).
+                 *
+                 * Children of Container (e.g. DatabaseServerDocker) get full
+                 * idempotent startup by inheriting this method — the
+                 * image-specific command flows through via `context.command`.
+                 */
+                ensureRunning: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, containerContext?: any): Promise<void> {
+                        const ctx = containerContext ?? this.context.derive();
+                        const name = ctx.name;
+
+                        if (name) {
+                            const output = await this.containers.list({
+                                all: true,
+                                filter: `name=${name}`,
+                                format: '{{.ID}}\t{{.Names}}\t{{.State}}',
+                            });
+                            const lines = (output as string).split('\n').map((l: string) => l.trim()).filter(Boolean);
+                            for (const line of lines) {
+                                const [id, cname, state] = line.split('\t');
+                                const normalized = cname?.startsWith('/') ? cname.slice(1) : cname;
+                                if (normalized !== name) continue;
+                                if (state === 'running') {
+                                    // Already running — preserve whatever id
+                                    // was captured by a previous `run()` (it
+                                    // may be the long form; `docker ps`
+                                    // returns the short form, which we'd
+                                    // rather not overwrite with).
+                                    if (!this._containerId) this._containerId = id;
+                                    return;
+                                }
+                                // Stopped container with our name exists — resume it.
+                                await this.cli.exec(['start', id]);
+                                if (!this._containerId) this._containerId = id;
+                                if (ctx.waitFor) {
+                                    await this.waitForSignalInLogs({
+                                        containerId: id,
+                                        signal: ctx.waitFor,
+                                        timeout: ctx.waitTimeout,
+                                    });
+                                }
+                                return;
+                            }
+                        }
+
+                        await this.run(ctx);
+                    }
+                },
+
                 list: {
                     type: CapsulePropertyTypes.Function,
                     value: async function (this: any, containerContext?: { image?: string }): Promise<any[]> {
@@ -109,21 +214,6 @@ export async function capsule({
                             containers.push({ id, name, image: img || '', status: status || '', ports: ports || '' });
                         }
                         return containers;
-                    }
-                },
-
-                cleanup: {
-                    type: CapsulePropertyTypes.Function,
-                    value: async function (this: any, containerContext?: { containerId?: string; force?: boolean; verbose?: boolean }): Promise<void> {
-                        const containerId = containerContext?.containerId ?? this._containerId;
-                        const verbose = containerContext?.verbose ?? this.context.verbose;
-                        if (!containerId) return;
-                        try { await this.stop({ containerId }); } catch (error) {
-                            if (verbose) console.log(`Warning: Failed to stop container: ${error}`);
-                        }
-                        try { await this.remove({ containerId, force: containerContext?.force ?? true }); } catch (error) {
-                            if (verbose) console.log(`Warning: Failed to remove container: ${error}`);
-                        }
                     }
                 },
 
@@ -173,15 +263,11 @@ export async function capsule({
                         } = ctx;
                         const self = this;
 
-                        let containerProc: ReturnType<typeof Bun.spawn> | null = null;
-                        let logsProc: ReturnType<typeof Bun.spawn> | null = null;
                         let signalReceived = false;
 
                         const signalHandler = (signal: string) => {
-                            if (verbose) console.error(`[run] Received ${signal}, killing spawned processes...`);
+                            if (verbose) console.error(`[run] Received ${signal}`);
                             signalReceived = true;
-                            if (containerProc && containerProc.exitCode === null) containerProc.kill();
-                            if (logsProc && logsProc.exitCode === null) logsProc.kill();
                         };
                         const sigintHandler = () => signalHandler('SIGINT');
                         const sigtermHandler = () => signalHandler('SIGTERM');
@@ -243,86 +329,50 @@ export async function capsule({
                             }
 
                             if (waitFor) {
-                                containerProc = Bun.spawn(['docker', ...args], { stdout: 'pipe', stderr: 'pipe' });
-                                const proc = containerProc;
-                                const result = await new Response(proc.stdout as any).text();
-                                await proc.exited;
-                                if (proc.exitCode !== 0) {
-                                    const error = await new Response(proc.stderr as any).text();
-                                    throw new Error(`Failed to start container: ${error}`);
+                                const runResult = await self.lib.spawnProcess({
+                                    cmd: ['docker', ...args],
+                                    waitForExit: true,
+                                });
+                                if (runResult.exitCode !== 0) {
+                                    throw new Error(`Failed to start container: ${runResult.stderr}`);
                                 }
-                                const containerId = result.trim();
+                                const containerId = runResult.stdout.trim();
                                 if (signalReceived) { cleanup(); return containerId; }
 
-                                logsProc = Bun.spawn(['docker', 'logs', '--tail', '100000', '-f', containerId], { stdout: 'pipe', stderr: 'pipe' });
+                                // Poll docker logs instead of streaming — Bun.spawn
+                                // pipes silently lose data under `bun test`.
                                 const waitPattern = new RegExp(waitFor);
                                 const timeoutMs = waitTimeout;
+                                const startTime = Date.now();
+                                const pollIntervalMs = 500;
 
-                                try {
-                                    const decoder = new TextDecoder();
-                                    let patternFoundFlag = false;
-                                    let resolvePattern: (() => void) | null = null;
-                                    const patternPromise = new Promise<void>((resolve) => { resolvePattern = resolve; });
-
-                                    const processStream = async (stream: ReadableStream<Uint8Array>, streamName: string, continueAfterPattern: boolean = false) => {
-                                        const reader = stream.getReader();
-                                        let buffer = '';
-                                        try {
-                                            while (true) {
-                                                const { done, value } = await reader.read();
-                                                if (done) {
-                                                    if (buffer && (showOutput || verbose)) Bun.write(Bun.stdout, `[container:${streamName}] ${buffer}\n`);
-                                                    break;
-                                                }
-                                                buffer += decoder.decode(value, { stream: true });
-                                                const lines = buffer.split('\n');
-                                                buffer = lines.pop() || '';
-                                                for (const line of lines) {
-                                                    if (showOutput || verbose) Bun.write(Bun.stdout, `[container:${streamName}] ${line}\n`);
-                                                    if (!patternFoundFlag && waitPattern.test(line)) {
-                                                        patternFoundFlag = true;
-                                                        if (resolvePattern) resolvePattern();
-                                                        if (!continueAfterPattern) return;
-                                                    }
-                                                }
-                                            }
-                                        } finally { reader.releaseLock(); }
-                                    };
-
-                                    const continueAfterPattern = showOutput || verbose;
-                                    const streamProcessing = Promise.all([
-                                        processStream(logsProc.stdout as any, 'stdout', continueAfterPattern),
-                                        processStream(logsProc.stderr as any, 'stderr', continueAfterPattern),
-                                    ]);
-                                    const timeout = new Promise<void>((_, reject) => {
-                                        setTimeout(() => reject(new Error(`Timeout waiting for pattern: ${waitFor}`)), timeoutMs);
+                                while (Date.now() - startTime < timeoutMs) {
+                                    if (signalReceived) { cleanup(); self._containerId = containerId; return containerId; }
+                                    const logsResult = await self.lib.spawnProcess({
+                                        cmd: ['docker', 'logs', containerId],
+                                        waitForExit: true,
                                     });
-
-                                    await Promise.race([
-                                        patternPromise,
-                                        streamProcessing.then(() => {
-                                            if (!patternFoundFlag && !signalReceived) {
-                                                throw new Error(`Container exited without matching pattern: ${waitFor}`);
-                                            }
-                                        }),
-                                        timeout,
-                                    ]);
-
-                                    if (signalReceived) { if (logsProc) logsProc.kill(); cleanup(); self._containerId = containerId; return containerId; }
-
-                                    if (continueAfterPattern) {
-                                        streamProcessing.catch((err) => console.error(`[run] Error in background log monitoring:`, err));
-                                    } else {
-                                        if (logsProc) logsProc.kill();
+                                    const allOutput = logsResult.stdout + '\n' + logsResult.stderr;
+                                    if (showOutput || verbose) {
+                                        process.stdout.write(allOutput);
                                     }
-                                    cleanup();
-                                    self._containerId = containerId;
-                                    return containerId;
-                                } catch (error) {
-                                    if (logsProc) logsProc.kill();
-                                    cleanup();
-                                    throw error;
+                                    if (waitPattern.test(allOutput)) {
+                                        cleanup();
+                                        self._containerId = containerId;
+                                        return containerId;
+                                    }
+                                    // Check if container is still running
+                                    const inspectResult = await self.lib.spawnProcess({
+                                        cmd: ['docker', 'inspect', '--format', '{{.State.Running}}', containerId],
+                                        waitForExit: true,
+                                    });
+                                    if (inspectResult.stdout.trim() === 'false') {
+                                        throw new Error(`Container exited without matching pattern: ${waitFor}`);
+                                    }
+                                    await new Promise(r => setTimeout(r, pollIntervalMs));
                                 }
+                                cleanup();
+                                throw new Error(`Timeout waiting for pattern: ${waitFor}`);
                             }
 
                             const result = await this.cli.exec(args);
@@ -342,48 +392,24 @@ export async function capsule({
                         const containerId = containerContext?.containerId ?? this._containerId;
                         if (!containerId) throw new Error('No containerId: container has not been started');
                         const timeout = containerContext?.timeout;
-                        const logsProc = Bun.spawn(['docker', 'logs', '-f', containerId], { stdout: 'pipe', stderr: 'pipe' });
-                        const capturedLogs: string[] = [];
-                        const decoder = new TextDecoder();
-                        const collectLogs = async (stream: ReadableStream<Uint8Array>, streamName: string) => {
-                            const reader = stream.getReader();
-                            let buffer = '';
-                            try {
-                                while (true) {
-                                    const { done, value } = await reader.read();
-                                    if (done) break;
-                                    buffer += decoder.decode(value, { stream: true });
-                                    const lines = buffer.split('\n');
-                                    buffer = lines.pop() || '';
-                                    for (const line of lines) {
-                                        capturedLogs.push(`[${streamName}] ${line}`);
-                                        if (this.context.verbose) Bun.write(Bun.stdout, `[stop:${streamName}] ${line}\n`);
-                                    }
-                                }
-                                if (buffer) {
-                                    capturedLogs.push(`[${streamName}] ${buffer}`);
-                                    if (this.context.verbose) Bun.write(Bun.stdout, `[stop:${streamName}] ${buffer}\n`);
-                                }
-                            } finally { reader.releaseLock(); }
-                        };
-                        const logsCollection = Promise.all([
-                            collectLogs(logsProc.stdout as any, 'stdout'),
-                            collectLogs(logsProc.stderr as any, 'stderr'),
-                        ]);
                         try {
                             const args = ['stop'];
                             if (timeout !== undefined) args.push('-t', timeout.toString());
                             args.push(containerId);
                             return await this.cli.exec(args);
                         } catch (error) {
+                            // On failure, capture logs for context
+                            let logsContext = '\n\nNo logs captured';
+                            try {
+                                const logsResult = await this.lib.spawnProcess({
+                                    cmd: ['docker', 'logs', containerId],
+                                    waitForExit: true,
+                                });
+                                const allLogs = (logsResult.stdout + '\n' + logsResult.stderr).trim();
+                                if (allLogs) logsContext = `\n\nCaptured logs:\n${allLogs}`;
+                            } catch {}
                             const errorMessage = error instanceof Error ? error.message : String(error);
-                            const logsContext = capturedLogs.length > 0
-                                ? `\n\nCaptured logs:\n${capturedLogs.join('\n')}`
-                                : '\n\nNo logs captured';
                             throw new Error(`Failed to stop container ${containerId}: ${errorMessage}${logsContext}`);
-                        } finally {
-                            logsProc.kill();
-                            await Promise.race([logsCollection, new Promise(resolve => setTimeout(resolve, 1000))]);
                         }
                     }
                 },
@@ -414,77 +440,46 @@ export async function capsule({
                         containerId: string; signal: string; timeout?: number; lastInstanceEndSignal?: string;
                     }): Promise<void> {
                         const { containerId, signal, timeout = 30000, lastInstanceEndSignal } = containerContext;
-                        const logsProc = Bun.spawn(['docker', 'logs', '--tail', 'all', '-f', containerId], { stdout: 'pipe', stderr: 'pipe' });
-                        const decoder = new TextDecoder();
-                        let signalFound = false;
-                        let lastInstanceEnded = lastInstanceEndSignal ? false : true;
-                        let pendingSignalTimeout: Timer | null = null;
-                        let resolveSignal: (() => void) | null = null;
-                        const signalPromise = new Promise<void>((resolve) => { resolveSignal = resolve; });
+                        const startTime = Date.now();
+                        const pollIntervalMs = 500;
 
-                        const processStream = async (stream: ReadableStream<Uint8Array>, streamName: string) => {
-                            const reader = stream.getReader();
-                            let buffer = '';
-                            try {
-                                while (true) {
-                                    if (signalFound) break;
-                                    const { done, value } = await reader.read();
-                                    if (done) break;
-                                    buffer += decoder.decode(value, { stream: true });
-                                    const lines = buffer.split('\n');
-                                    buffer = lines.pop() || '';
-                                    for (const line of lines) {
-                                        if (this.context.verbose) console.log(`[waitForSignalInLogs:${streamName}] ${line}`);
-                                        if (lastInstanceEndSignal && line.indexOf(lastInstanceEndSignal) !== -1) {
-                                            if (pendingSignalTimeout) { clearTimeout(pendingSignalTimeout); pendingSignalTimeout = null; }
-                                            lastInstanceEnded = true;
-                                            continue;
-                                        }
-                                        if (!signalFound && line.indexOf(signal) !== -1) {
-                                            if (lastInstanceEndSignal && !lastInstanceEnded) {
-                                                signalFound = true;
-                                                if (resolveSignal) resolveSignal();
-                                                break;
-                                            } else if (lastInstanceEndSignal && lastInstanceEnded) {
-                                                if (pendingSignalTimeout) clearTimeout(pendingSignalTimeout);
-                                                pendingSignalTimeout = setTimeout(() => {
-                                                    signalFound = true;
-                                                    if (resolveSignal) resolveSignal();
-                                                }, 100);
-                                            } else {
-                                                signalFound = true;
-                                                if (resolveSignal) resolveSignal();
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if (signalFound) break;
-                                }
-                                if (buffer && !signalFound && buffer.indexOf(signal) !== -1) {
-                                    signalFound = true;
-                                    if (resolveSignal) resolveSignal();
-                                }
-                            } finally { reader.releaseLock(); }
-                        };
+                        while (Date.now() - startTime < timeout) {
+                            const logsResult = await this.lib.spawnProcess({
+                                cmd: ['docker', 'logs', containerId],
+                                waitForExit: true,
+                            });
+                            const allOutput = logsResult.stdout + '\n' + logsResult.stderr;
+                            const lines = allOutput.split('\n');
 
-                        const streamProcessing = Promise.all([
-                            processStream(logsProc.stdout as any, 'stdout'),
-                            processStream(logsProc.stderr as any, 'stderr'),
-                        ]);
-                        const timeoutPromise = new Promise<void>((_, reject) => {
-                            setTimeout(() => reject(new Error(`Timeout waiting for signal "${signal}" in container ${containerId} logs (${timeout}ms)`)), timeout);
-                        });
-                        try {
-                            await Promise.race([
-                                signalPromise,
-                                streamProcessing.then(() => {
-                                    if (!signalFound) throw new Error(`Container logs ended without finding signal: "${signal}"`);
-                                }),
-                                timeoutPromise,
-                            ]);
-                        } finally {
-                            logsProc.kill();
+                            if (lastInstanceEndSignal) {
+                                // Find the last occurrence of the end signal, then look for the signal after it
+                                let lastEndIdx = -1;
+                                for (let i = 0; i < lines.length; i++) {
+                                    if (lines[i].indexOf(lastInstanceEndSignal) !== -1) lastEndIdx = i;
+                                }
+                                // Look for signal after the last end marker (or anywhere if no end marker found)
+                                const searchFrom = lastEndIdx >= 0 ? lastEndIdx + 1 : 0;
+                                for (let i = searchFrom; i < lines.length; i++) {
+                                    if (lines[i].indexOf(signal) !== -1) return;
+                                }
+                            } else {
+                                for (const line of lines) {
+                                    if (line.indexOf(signal) !== -1) return;
+                                }
+                            }
+
+                            // Check if container is still running
+                            const inspectResult = await this.lib.spawnProcess({
+                                cmd: ['docker', 'inspect', '--format', '{{.State.Running}}', containerId],
+                                waitForExit: true,
+                            });
+                            if (inspectResult.stdout.trim() === 'false') {
+                                throw new Error(`Container logs ended without finding signal: "${signal}"`);
+                            }
+
+                            await new Promise(r => setTimeout(r, pollIntervalMs));
                         }
+                        throw new Error(`Timeout waiting for signal "${signal}" in container ${containerId} logs (${timeout}ms)`);
                     }
                 },
             }

@@ -41,6 +41,21 @@ export async function capsule({
                     type: CapsulePropertyTypes.Literal,
                     value: capsule['#']
                 },
+                // Schema-defined fields exposed as Literals so non-secret values can be
+                // wired via Mapping options (e.g. in tests) instead of stored config.
+                // getConfigValue() prefers these when set.
+                username: {
+                    type: CapsulePropertyTypes.Literal,
+                    value: undefined as string | undefined,
+                },
+                password: {
+                    type: CapsulePropertyTypes.Literal,
+                    value: undefined as string | undefined,
+                },
+                organization: {
+                    type: CapsulePropertyTypes.Literal,
+                    value: undefined as string | undefined,
+                },
             }
         }
     }, {

@@ -20,9 +20,7 @@ const {
                         '#': {
                             bunTest,
                             env: {
-                                DOCKERHUB_USERNAME: { factReference: '@stream44.studio/t44-docker.com/structs/Hub/WorkspaceConnectionConfig:username' },
                                 DOCKERHUB_PASSWORD: { factReference: '@stream44.studio/t44-docker.com/structs/Hub/WorkspaceConnectionConfig:password' },
-                                DOCKERHUB_ORGANIZATION: { factReference: '@stream44.studio/t44-docker.com/structs/Hub/WorkspaceConnectionConfig:organization' },
                             }
                         }
                     }
@@ -30,6 +28,14 @@ const {
                 hub: {
                     type: CapsulePropertyTypes.Mapping,
                     value: './Hub',
+                    options: {
+                        '@stream44.studio/t44-docker.com/structs/Hub/WorkspaceConnectionConfig': {
+                            '#': {
+                                username: 'cadorn',
+                                organization: 'stream44',
+                            },
+                        },
+                    },
                 },
                 imageContext: {
                     type: CapsulePropertyTypes.Mapping,

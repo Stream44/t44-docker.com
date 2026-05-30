@@ -84,8 +84,8 @@ console.log(\`Server running on port \${server.port}\`);
 
 describe('Container Capsule', () => {
 
-    describe('run / stop / cleanup', () => {
-        it('should run, verify, and cleanup a container', async () => {
+    describe('run / stop / ensureStopped', () => {
+        it('should run, verify (isRunning + isServing), and stop a container', async () => {
             const appDir = join(workbenchDir, 'container-run-test');
             const imageTag = await buildTestImage(appDir, 'test-docker-com', 'container-run-test');
 
@@ -107,25 +107,82 @@ describe('Container Capsule', () => {
             const containerId = await container.run(containerContext);
             expect(containerId).toBeTruthy();
 
-            // Verify running
-            const isRunning = await container.isRunning({
+            // Verify docker-state liveness (protocol-agnostic)
+            expect(await container.isRunning(containerContext)).toBe(true);
+
+            // Verify HTTP-level liveness — the in-container process is serving
+            const isServing = await container.isServing({
                 ...containerContext,
                 retryDelayMs: 1000,
                 requestTimeoutMs: 5000,
                 timeoutMs: 30000,
             });
-            expect(isRunning).toBe(true);
+            expect(isServing).toBe(true);
 
             // List
             const containers = await container.list(containerContext);
             expect(containers.length).toBeGreaterThan(0);
 
-            // Cleanup
-            await container.cleanup(containerContext);
+            // Stop and remove
+            await container.ensureStopped(containerContext);
+            expect(await container.isRunning(containerContext)).toBe(false);
 
             // Cleanup image
             await image.removeImage({ image: imageTag, force: true }).catch(() => { });
         }, 120000);
+    });
+
+    describe('isRunning', () => {
+        it('returns false for an unknown container name', async () => {
+            const ctx = container.context.derive({ name: `t44-docker-nonexistent-${Date.now()}` });
+            expect(await container.isRunning(ctx)).toBe(false);
+        });
+    });
+
+    describe('ensureRunning', () => {
+        it('runs fresh, then no-ops, then resumes a stopped container', async () => {
+            const appDir = join(workbenchDir, 'container-ensure-running-test');
+            const imageTag = await buildTestImage(appDir, 'test-docker-com', 'container-ensure-running-test');
+
+            const containerContext = container.context.derive({
+                image: imageTag,
+                name: `t44-docker-ensure-running-${Date.now()}`,
+                ports: [{ internal: 3000, external: 13581 }],
+                detach: true,
+                waitFor: 'READY',
+                waitTimeout: 30000,
+                verbose: false,
+                showOutput: false,
+            });
+
+            try {
+                await container.ensureStopped(containerContext);
+                expect(await container.isRunning(containerContext)).toBe(false);
+
+                // 1. Fresh — should create + start
+                await container.ensureRunning(containerContext);
+                expect(await container.isRunning(containerContext)).toBe(true);
+                const firstId = container.getContainerId();
+                expect(firstId).toBeTruthy();
+
+                // 2. Already running — no-op (same container id)
+                await container.ensureRunning(containerContext);
+                expect(await container.isRunning(containerContext)).toBe(true);
+                expect(container.getContainerId()).toBe(firstId);
+
+                // 3. Stopped (still present) — should resume via `docker start`
+                await container.stop({ containerId: firstId });
+                expect(await container.isRunning(containerContext)).toBe(false);
+
+                await container.ensureRunning(containerContext);
+                expect(await container.isRunning(containerContext)).toBe(true);
+                // Same id, just resumed
+                expect(container.getContainerId()).toBe(firstId);
+            } finally {
+                await container.ensureStopped(containerContext);
+                await image.removeImage({ image: imageTag, force: true }).catch(() => { });
+            }
+        }, 180000);
     });
 
     describe('ensureStopped', () => {

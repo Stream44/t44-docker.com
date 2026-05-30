@@ -104,7 +104,7 @@ export async function capsule({
                 apiCall: {
                     type: CapsulePropertyTypes.Function,
                     value: async function (this: any, options: {
-                        method: 'GET' | 'POST' | 'DELETE';
+                        method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
                         path: string;
                         requireAuth?: boolean;
                         body?: any;
@@ -158,7 +158,7 @@ export async function capsule({
                         repository: string;
                         namespace?: string;
                     }): Promise<string[]> {
-                        const namespace = options.namespace || this.getNamespace();
+                        const namespace = options.namespace || await this.getNamespace();
                         const repository = options.repository;
 
                         const data = await this.apiCall({
@@ -167,6 +167,45 @@ export async function capsule({
                         });
 
                         return data.results?.map((result: any) => result.name) || [];
+                    }
+                },
+
+                /**
+                 * Wait until `/v2/repositories/{ns}/{repo}/` is reachable, tolerating
+                 * the brief window right after first push where Docker Hub's API
+                 * index hasn't caught up and returns 404.
+                 */
+                waitForRepository: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        repository: string;
+                        namespace?: string;
+                        timeoutMs?: number;
+                        pollIntervalMs?: number;
+                    }): Promise<any> {
+                        const namespace = options.namespace || await this.getNamespace();
+                        const repository = options.repository;
+                        const timeoutMs = options.timeoutMs ?? 60_000;
+                        const pollIntervalMs = options.pollIntervalMs ?? 2_000;
+
+                        const startTime = Date.now();
+                        let attempt = 0;
+                        let lastErr: any;
+                        while (Date.now() - startTime < timeoutMs) {
+                            attempt++;
+                            try {
+                                return await this.getStats({ namespace, repository });
+                            } catch (err: any) {
+                                lastErr = err;
+                                const msg = String(err?.message ?? err);
+                                if (!(msg.includes('404') || msg.toLowerCase().includes('not found'))) {
+                                    throw err;
+                                }
+                                console.log(`[Hub] waitForRepository ${namespace}/${repository}: attempt ${attempt} 404 — retrying in ${pollIntervalMs}ms`);
+                                await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+                            }
+                        }
+                        throw new Error(`[Hub] waitForRepository ${namespace}/${repository} timed out after ${timeoutMs}ms: ${lastErr?.message ?? lastErr}`);
                     }
                 },
 
@@ -207,10 +246,266 @@ export async function capsule({
                         const repository = options.repository;
                         const tag = options.tag;
 
+                        // Must be authenticated — Docker Hub returns 404 for tags
+                        // in private repositories when the caller is anonymous.
                         return await this.apiCall({
                             method: 'GET',
                             path: `/v2/repositories/${namespace}/${repository}/tags/${tag}`,
-                            requireAuth: false,
+                            requireAuth: true,
+                        });
+                    }
+                },
+
+                /**
+                 * Create an empty repository on Docker Hub via API. Unlike the
+                 * implicit "first push creates repo" path, this lets the caller
+                 * control `is_private` at birth — no public window.
+                 *
+                 * Idempotent: returns existing stats if repo already exists.
+                 */
+                createRepository: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        repository: string;
+                        namespace?: string;
+                        private?: boolean;
+                        description?: string;
+                    }): Promise<any> {
+                        const namespace = options.namespace || await this.getNamespace();
+                        const repository = options.repository;
+                        const isPrivate = options.private === true;
+                        const description = options.description ?? '';
+
+                        // Idempotency: if it already exists, return without POST.
+                        try {
+                            const stats = await this.getStats({ namespace, repository });
+                            console.log(`[Hub] createRepository: ${namespace}/${repository} already exists (is_private=${stats.is_private}) — skipping POST`);
+                            return stats;
+                        } catch (err: any) {
+                            const msg = String(err?.message ?? err);
+                            if (!(msg.includes('404') || msg.toLowerCase().includes('not found'))) {
+                                throw err;
+                            }
+                            // fall through to create
+                        }
+
+                        const body = {
+                            namespace,
+                            name: repository,
+                            description,
+                            is_private: isPrivate,
+                        };
+                        console.log(`[Hub] POST /v2/repositories/ body=${JSON.stringify(body)}`);
+                        const result = await this.apiCall({
+                            method: 'POST',
+                            path: `/v2/repositories/`,
+                            body,
+                        });
+                        console.log(`[Hub] POST response: is_private=${result?.is_private} name=${result?.name} namespace=${result?.namespace}`);
+                        return result;
+                    }
+                },
+
+                /**
+                 * Guarantee that `{namespace}/{repository}` exists on Docker Hub
+                 * AND that its `is_private` flag matches `options.private`, with
+                 * post-operation verification. Safe to call before any push.
+                 *
+                 * This is the only path that closes the "brand-new repo is public
+                 * on first push" race: if the repo doesn't exist yet, we create
+                 * it via `POST /v2/repositories/` with `is_private` set correctly,
+                 * then verify. If it exists with the wrong flag, we PATCH + verify.
+                 */
+                ensureRepository: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        repository: string;
+                        namespace?: string;
+                        private: boolean;
+                        description?: string;
+                        timeoutMs?: number;
+                        pollIntervalMs?: number;
+                    }): Promise<{ is_private: boolean; created: boolean }> {
+                        const namespace = options.namespace || await this.getNamespace();
+                        const repository = options.repository;
+                        const desiredPrivate = options.private === true;
+
+                        console.log(`[Hub] ensureRepository: ${namespace}/${repository} desired is_private=${desiredPrivate}`);
+
+                        let created = false;
+                        try {
+                            await this.getStats({ namespace, repository });
+                        } catch (err: any) {
+                            const msg = String(err?.message ?? err);
+                            if (msg.includes('404') || msg.toLowerCase().includes('not found')) {
+                                console.log(`[Hub] ensureRepository: creating ${namespace}/${repository} as is_private=${desiredPrivate}`);
+                                await this.createRepository({
+                                    namespace,
+                                    repository,
+                                    private: desiredPrivate,
+                                    description: options.description,
+                                });
+                                created = true;
+                            } else {
+                                throw err;
+                            }
+                        }
+
+                        // Whether we just created it or it already existed, verify +
+                        // flip if needed. `setPrivacy` is idempotent when already aligned.
+                        const result = await this.setPrivacy({
+                            namespace,
+                            repository,
+                            private: desiredPrivate,
+                            timeoutMs: options.timeoutMs,
+                            pollIntervalMs: options.pollIntervalMs,
+                        });
+                        return { is_private: result.is_private, created };
+                    }
+                },
+
+                /**
+                 * Patch a repository on Docker Hub. Common use: set `is_private: true`
+                 * after the first push (Docker Hub creates new repos public by default).
+                 */
+                patchRepository: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        repository: string;
+                        namespace?: string;
+                        data: Record<string, any>;
+                    }): Promise<any> {
+                        const namespace = options.namespace || await this.getNamespace();
+                        const repository = options.repository;
+
+                        console.log(`[Hub] PATCH /v2/repositories/${namespace}/${repository}/ body=${JSON.stringify(options.data)}`);
+                        const result = await this.apiCall({
+                            method: 'PATCH',
+                            path: `/v2/repositories/${namespace}/${repository}/`,
+                            body: options.data,
+                        });
+                        console.log(`[Hub] PATCH response: is_private=${result?.is_private} name=${result?.name} namespace=${result?.namespace}`);
+                        return result;
+                    }
+                },
+
+                /**
+                 * Set a repository's privacy flag on Docker Hub and VERIFY the change
+                 * was persisted by re-reading `/v2/repositories/{ns}/{repo}/` after PATCH.
+                 *
+                 * Asymmetric safety:
+                 *   - public → private: auto-flip (more restrictive, safe).
+                 *   - private → public: NEVER auto-flip — throws. Operator must toggle manually
+                 *     to prevent accidental disclosure of a previously private repo.
+                 *   - already at desired state: no-op.
+                 *
+                 * Tolerates the short window right after first push where Docker Hub's
+                 * API returns 404 (repo exists in the registry but not yet indexed by
+                 * the Hub API) via `waitForRepository`.
+                 *
+                 * Throws if the flag is not reflected after PATCH + verification poll.
+                 */
+                setPrivacy: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        repository: string;
+                        namespace?: string;
+                        private: boolean;
+                        timeoutMs?: number;
+                        pollIntervalMs?: number;
+                    }): Promise<{ changed: boolean; is_private: boolean }> {
+                        const namespace = options.namespace || await this.getNamespace();
+                        const repository = options.repository;
+                        const desiredPrivate = options.private === true;
+                        const timeoutMs = options.timeoutMs ?? 30_000;
+                        const pollIntervalMs = options.pollIntervalMs ?? 2_000;
+
+                        console.log(`[Hub] setPrivacy: ${namespace}/${repository} → desired is_private=${desiredPrivate}`);
+
+                        // 1. Wait for repo to be reachable via Hub API (handles post-push lag).
+                        const stats = await this.waitForRepository({ namespace, repository, timeoutMs, pollIntervalMs });
+                        console.log(`[Hub] setPrivacy: current is_private=${stats.is_private}`);
+                        if (stats.is_private === desiredPrivate) {
+                            console.log(`[Hub] setPrivacy: already at desired state — no-op`);
+                            return { changed: false, is_private: stats.is_private };
+                        }
+
+                        // Safety rule: NEVER auto-flip private → public.
+                        // The system must never accidentally make a private repo public; this requires manual action.
+                        if (stats.is_private === true && desiredPrivate === false) {
+                            throw new Error(
+                                `[Hub] setPrivacy: ${namespace}/${repository} is private but config wants public. ` +
+                                `The system will NEVER make a private repo public automatically. ` +
+                                `If you want this repo to be public, toggle it manually at ` +
+                                `https://hub.docker.com/repository/docker/${namespace}/${repository}/settings.`
+                            );
+                        }
+
+                        // 2. PATCH (public → private path).
+                        await this.patchRepository({
+                            namespace,
+                            repository,
+                            data: { is_private: desiredPrivate },
+                        });
+
+                        // 3. Verify the change actually applied (post-PATCH poll).
+                        //    Docker Hub's PATCH returns 200 even when the field is not
+                        //    persisted (e.g., token scope lacks admin rights), so we MUST
+                        //    re-read the repo and confirm.
+                        const verifyStart = Date.now();
+                        let lastIsPrivate = stats.is_private;
+                        while (Date.now() - verifyStart < timeoutMs) {
+                            const fresh = await this.getStats({ namespace, repository });
+                            lastIsPrivate = fresh.is_private;
+                            if (fresh.is_private === desiredPrivate) {
+                                console.log(`[Hub] setPrivacy: VERIFIED is_private=${fresh.is_private}`);
+                                return { changed: true, is_private: fresh.is_private };
+                            }
+                            console.log(`[Hub] setPrivacy: verify poll — current is_private=${fresh.is_private}, waiting ${pollIntervalMs}ms`);
+                            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+                        }
+                        throw new Error(
+                            `[Hub] setPrivacy: PATCH did not take effect — ${namespace}/${repository} ` +
+                            `still reports is_private=${lastIsPrivate} after ${timeoutMs}ms. ` +
+                            `This usually means the Docker Hub token lacks admin scope. ` +
+                            `Check token permissions at https://app.docker.com/settings/personal-access-tokens ` +
+                            `or toggle manually at https://hub.docker.com/repository/docker/${namespace}/${repository}/settings.`
+                        );
+                    }
+                },
+
+                /**
+                 * Ensure a repository is marked private on Docker Hub.
+                 * Thin wrapper around `setPrivacy` with verification.
+                 */
+                ensurePrivate: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        repository: string;
+                        namespace?: string;
+                    }): Promise<void> {
+                        await this.setPrivacy({
+                            namespace: options.namespace,
+                            repository: options.repository,
+                            private: true,
+                        });
+                    }
+                },
+
+                /**
+                 * Ensure a repository is marked public on Docker Hub.
+                 * Thin wrapper around `setPrivacy` with verification.
+                 */
+                ensurePublic: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, options: {
+                        repository: string;
+                        namespace?: string;
+                    }): Promise<void> {
+                        await this.setPrivacy({
+                            namespace: options.namespace,
+                            repository: options.repository,
+                            private: false,
                         });
                     }
                 },
@@ -232,13 +527,16 @@ export async function capsule({
                         is_private: boolean;
                         last_updated: string;
                     }> {
-                        const namespace = options.namespace || this.getNamespace();
+                        const namespace = options.namespace || await this.getNamespace();
                         const repository = options.repository;
 
+                        // Must be authenticated — Docker Hub returns 404 for private
+                        // repositories when the caller is anonymous, which would
+                        // falsely look like the repo doesn't exist.
                         const data = await this.apiCall({
                             method: 'GET',
                             path: `/v2/repositories/${namespace}/${repository}/`,
-                            requireAuth: false,
+                            requireAuth: true,
                         });
 
                         return {
@@ -265,7 +563,7 @@ export async function capsule({
                         timeoutMs?: number;
                         pollIntervalMs?: number;
                     }): Promise<void> {
-                        const namespace = options.namespace || this.getNamespace();
+                        const namespace = options.namespace || await this.getNamespace();
                         const repository = options.repository;
                         const tag = options.tag;
                         const timeoutMs = options.timeoutMs ?? 30000;
@@ -316,7 +614,7 @@ export async function capsule({
                         timeoutMs?: number;
                         pollIntervalMs?: number;
                     }): Promise<void> {
-                        const namespace = options.namespace || this.getNamespace();
+                        const namespace = options.namespace || await this.getNamespace();
                         const repository = options.repository;
                         const { wait = false, timeoutMs = 5 * 60 * 1000, pollIntervalMs = 15000 } = options;
 
@@ -372,7 +670,6 @@ export async function capsule({
                             'login',
                             '-u', username,
                             '--password-stdin',
-                            'registry.hub.docker.com'
                         ], { stdin: password + '\n' });
 
                         return result;

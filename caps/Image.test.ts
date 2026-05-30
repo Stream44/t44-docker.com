@@ -307,4 +307,102 @@ describe('Image Capsule', () => {
             expect(content.arch).toBe('linux-arm64');
         });
     });
+
+    describe('ensureBuilder', () => {
+
+        // Use a unique name per test run so we don't collide with the user's builders.
+        const builderName = `t44-test-${Math.random().toString(36).slice(2, 10)}`;
+
+        it('creates a local-only builder, is idempotent, and is recognised by buildx', async () => {
+            // First call creates the builder.
+            await image.ensureBuilder({
+                name: builderName,
+                nodes: [
+                    { name: 'local', platforms: ['linux/arm64', 'linux/amd64'] },
+                ],
+            });
+
+            // Verify the builder exists.
+            const inspect1 = await image.cli.exec(['buildx', 'inspect', builderName]);
+            expect(inspect1).toContain(builderName);
+
+            // Second call is a no-op (idempotent).
+            await image.ensureBuilder({
+                name: builderName,
+                nodes: [
+                    { name: 'local', platforms: ['linux/arm64', 'linux/amd64'] },
+                ],
+            });
+
+            const inspect2 = await image.cli.exec(['buildx', 'inspect', builderName]);
+            expect(inspect2).toContain(builderName);
+
+            // Cleanup.
+            await image.cli.exec(['buildx', 'rm', builderName]).catch(() => null);
+        }, 120_000);
+
+        it('idempotent re-invocation with the same node does not duplicate', async () => {
+            const name = `${builderName}-rerun`;
+
+            // Initial creation.
+            await image.ensureBuilder({
+                name,
+                nodes: [{ name: 'local', platforms: ['linux/arm64', 'linux/amd64'] }],
+            });
+            const inspect1 = await image.cli.exec(['buildx', 'inspect', name]);
+            const nodeCount1 = (inspect1.match(/^Name:\s+\S+/gm) || []).length;
+
+            // Repeat call — node is detected as already attached, no duplicate added.
+            await image.ensureBuilder({
+                name,
+                nodes: [{ name: 'local', platforms: ['linux/arm64', 'linux/amd64'] }],
+            });
+            const inspect2 = await image.cli.exec(['buildx', 'inspect', name]);
+            const nodeCount2 = (inspect2.match(/^Name:\s+\S+/gm) || []).length;
+
+            expect(nodeCount2).toBe(nodeCount1);
+
+            // Cleanup.
+            await image.cli.exec(['buildx', 'rm', name]).catch(() => null);
+        }, 120_000);
+    });
+
+    describe('buildMultiPlatform — buildx mode validation', () => {
+
+        it('rejects per-arch files callbacks when context.builder is set', async () => {
+            // Configure the image context to use a builder.
+            image.context.builder = 'some-builder';
+            image.context.appBaseDir = workbenchDir;
+
+            try {
+                await expect(
+                    image.buildMultiPlatform({
+                        variant: 'alpine',
+                        tags: ['org/repo:alpine'],
+                        push: true,
+                        files: { 'extra.txt': 'hello' },
+                    } as any)
+                ).rejects.toThrow(/buildx mode does not support per-arch 'files'/);
+            } finally {
+                image.context.builder = undefined;
+            }
+        });
+
+        it('rejects push=false in buildx mode', async () => {
+            image.context.builder = 'some-builder';
+            image.context.appBaseDir = workbenchDir;
+
+            try {
+                await expect(
+                    image.buildMultiPlatform({
+                        variant: 'alpine',
+                        tags: ['org/repo:alpine'],
+                        push: false,
+                    } as any)
+                ).rejects.toThrow(/buildx mode currently requires push=true/);
+            } finally {
+                image.context.builder = undefined;
+            }
+        });
+    });
 });

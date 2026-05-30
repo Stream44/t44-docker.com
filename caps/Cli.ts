@@ -1,4 +1,3 @@
-import { $ } from 'bun'
 import * as path from 'path'
 
 /**
@@ -24,6 +23,10 @@ export async function capsule({
         '#@stream44.studio/encapsulate/spine-contracts/CapsuleSpineContract.v0': {
             '#@stream44.studio/encapsulate/structs/Capsule': {},
             '#': {
+                lib: {
+                    type: CapsulePropertyTypes.Mapping,
+                    value: '@stream44.studio/t44/caps/WorkspaceLib',
+                },
                 verbose: {
                     type: CapsulePropertyTypes.Literal,
                     value: false,
@@ -74,6 +77,8 @@ export async function capsule({
                                 console.log(`[docker] Executing: docker ${args.join(' ')}`);
                             }
                             if (options?.stdin !== undefined) {
+                                // stdin piping is only used for docker login etc.,
+                                // not in test contexts, so Bun.spawn is fine here.
                                 const proc = Bun.spawn(['docker', ...args], {
                                     stdin: 'pipe',
                                     stdout: 'pipe',
@@ -91,8 +96,17 @@ export async function capsule({
                                 }
                                 return stdout.trim();
                             }
-                            const result = await $`docker ${args}`.text();
-                            return result.trim();
+                            // Use spawnProcess for normal exec — handles bun test
+                            // pipe bug via temp file fallback automatically.
+                            const result = await this.lib.spawnProcess({
+                                cmd: ['docker', ...args],
+                                waitForExit: true,
+                                verbose: this.verbose,
+                            });
+                            if (result.exitCode !== 0) {
+                                throw new Error(`docker ${args[0]} failed (exit ${result.exitCode}): ${result.stderr}`);
+                            }
+                            return result.stdout.trim();
                         };
 
                         let lastError: unknown;

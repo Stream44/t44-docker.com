@@ -516,10 +516,111 @@ export async function capsule({
                 },
 
                 /**
+                 * Idempotently ensure a docker buildx builder exists with the requested
+                 * nodes. Each node may be local (no `host`) or remote-over-SSH (`host`
+                 * looks like `ssh://user@host`). For remote nodes a docker context
+                 * named after the node is created if missing, then attached as a node
+                 * of the builder. Finally the builder is bootstrapped.
+                 *
+                 * Returns immediately if the builder already exists; appended nodes are
+                 * only added if missing. Safe to call on every deploy.
+                 */
+                ensureBuilder: {
+                    type: CapsulePropertyTypes.Function,
+                    value: async function (this: any, opts: {
+                        name: string;
+                        nodes: Array<{
+                            name: string;
+                            host?: string;
+                            platforms: string[];
+                        }>;
+                        driver?: string;
+                    }): Promise<void> {
+                        const { name, nodes } = opts;
+                        const driver = opts.driver ?? 'docker-container';
+
+                        if (!name) throw new Error('ensureBuilder: name is required');
+                        if (!nodes || nodes.length === 0) throw new Error('ensureBuilder: at least one node required');
+
+                        // 1. Ensure docker contexts exist for any remote (ssh://) nodes
+                        for (const node of nodes) {
+                            if (!node.host) continue;
+                            const contextName = node.name;
+                            const exists = await this.cli.exec(['context', 'inspect', contextName]).catch(() => null);
+                            if (!exists) {
+                                if (this.context.verbose) console.log(`[ensureBuilder] Creating docker context '${contextName}' -> ${node.host}`);
+                                await this.cli.exec(['context', 'create', contextName, '--docker', `host=${node.host}`]);
+                            } else if (this.context.verbose) {
+                                console.log(`[ensureBuilder] Docker context '${contextName}' already exists`);
+                            }
+                        }
+
+                        // 2. Inspect existing builder (if any) so we can reconcile nodes.
+                        let existingNodes: Set<string> = new Set();
+                        const inspectResult = await this.cli.exec(['buildx', 'inspect', name]).catch(() => null);
+                        const builderExists = !!inspectResult;
+                        if (builderExists) {
+                            // Parse "Name:" lines from `docker buildx inspect` output to
+                            // determine which node names are already attached.
+                            const lines = (inspectResult as string).split('\n');
+                            for (const line of lines) {
+                                const m = line.match(/^Name:\s+(\S+)/);
+                                if (m && m[1] !== name) existingNodes.add(m[1]);
+                            }
+                            if (this.context.verbose) {
+                                console.log(`[ensureBuilder] Builder '${name}' already exists with nodes: ${[...existingNodes].join(', ') || '(none)'}`);
+                            }
+                        }
+
+                        // 3. For each requested node, ensure it's attached to the builder.
+                        let isFirst = !builderExists;
+                        for (const node of nodes) {
+                            const nodeName = `${name}-${node.name}`;
+                            if (existingNodes.has(nodeName)) {
+                                if (this.context.verbose) console.log(`[ensureBuilder] Node '${nodeName}' already attached to '${name}'`);
+                                continue;
+                            }
+                            const args = ['buildx', 'create'];
+                            if (isFirst) {
+                                args.push('--name', name, '--driver', driver);
+                                isFirst = false;
+                            } else {
+                                args.push('--append', '--name', name);
+                            }
+                            args.push('--node', nodeName);
+                            args.push('--platform', node.platforms.join(','));
+                            // Last positional: docker context name for remote nodes (already created above).
+                            // Omit for local default context.
+                            if (node.host) args.push(node.name);
+
+                            if (this.context.verbose) {
+                                console.log(`[ensureBuilder] ${builderExists || !isFirst ? 'Appending' : 'Creating'} node '${nodeName}' (${node.platforms.join(',')})${node.host ? ` via ${node.host}` : ' (local)'}`);
+                            }
+                            await this.cli.exec(args);
+                        }
+
+                        // 4. Bootstrap (idempotent) so the builder is ready to accept builds.
+                        if (this.context.verbose) console.log(`[ensureBuilder] Bootstrapping builder '${name}'`);
+                        await this.cli.exec(['buildx', 'inspect', '--bootstrap', name]);
+                    }
+                },
+
+                /**
                  * Build and optionally push a multi-platform image.
-                 * Builds each architecture separately (so arch-dependent file callbacks
-                 * receive the correct archDir), pushes per-arch images, then creates
-                 * and pushes multi-arch manifest lists for each requested tag.
+                 *
+                 * Two modes:
+                 *
+                 * 1. **buildx mode** (when `context.builder` is set):
+                 *    A single `docker buildx build --builder <name> --platform <list>
+                 *    --push -t tag1 -t tag2 <appBaseDir>` invocation. Each platform is
+                 *    routed to its native node (so amd64 doesn't go through QEMU on an
+                 *    arm64 host), and a multi-arch manifest is pushed in one shot. No
+                 *    arch-dependent file callbacks are supported in this mode.
+                 *
+                 * 2. **legacy per-arch mode** (default):
+                 *    Builds each architecture separately (so arch-dependent file
+                 *    callbacks receive the correct archDir), pushes per-arch images,
+                 *    then creates and pushes multi-arch manifest lists for each tag.
                  */
                 buildMultiPlatform: {
                     type: CapsulePropertyTypes.Function,
@@ -550,6 +651,55 @@ export async function capsule({
                             .map((a: any) => `${a.os}/${a.arch}`)
                             .join(',');
 
+                        // ── buildx mode ───────────────────────────────────────────────
+                        if (this.context.builder) {
+                            if (files) {
+                                throw new Error(`buildx mode does not support per-arch 'files' callbacks; either drop 'files' or unset context.builder.`);
+                            }
+                            if (!push) {
+                                throw new Error(`buildx mode currently requires push=true (use registry.pushProject) — build outputs live on the remote node.`);
+                            }
+                            if (!this.context.appBaseDir) {
+                                throw new Error(`buildx mode requires context.appBaseDir to be set.`);
+                            }
+                            const dockerfileSpec = this.context.dockerfile ?? variantInfo.dockerfile;
+                            const dockerfilePath = isAbsolute(dockerfileSpec)
+                                ? dockerfileSpec
+                                : join(this.context.appBaseDir, dockerfileSpec);
+
+                            const args = ['buildx', 'build',
+                                '--builder', this.context.builder,
+                                '--platform', platforms,
+                                '-f', dockerfilePath,
+                            ];
+                            for (const tag of tags) args.push('-t', tag);
+                            if (attestations?.sbom) args.push('--attest', 'type=sbom');
+                            if (attestations?.provenance) args.push('--attest', 'type=provenance,mode=max');
+                            if (opts.buildArgs) {
+                                for (const [k, v] of Object.entries(opts.buildArgs)) {
+                                    args.push('--build-arg', `${k}=${v}`);
+                                }
+                            }
+                            args.push('--push');
+                            args.push(this.context.appBaseDir);
+
+                            if (this.context.verbose) {
+                                console.log(`\nBuilding ${variant} via buildx builder '${this.context.builder}' for ${platforms} (with push)...`);
+                            }
+
+                            await this.cli.exec(args);
+
+                            if (this.context.verbose) {
+                                console.log(`✅ Built and pushed multi-platform ${variant} (${platforms})`);
+                                for (const tag of tags) {
+                                    console.log(`   ${tag} (pushed)`);
+                                }
+                            }
+
+                            return { tags };
+                        }
+
+                        // ── legacy per-arch mode ──────────────────────────────────────
                         if (this.context.verbose) {
                             console.log(`\nBuilding ${variant} for ${platforms}${push ? ' (with push)' : ''}...`);
                         }
